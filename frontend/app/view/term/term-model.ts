@@ -506,9 +506,48 @@ export class TermViewModel implements ViewModel {
         }
     }
 
+    private pendingInputData = "";
+    private inputFlushScheduled = false;
+    private inputSendInFlight = false;
+
     sendDataToController(data: string) {
-        const b64data = stringToBase64(data);
-        RpcApi.ControllerInputCommand(TabRpcClient, { blockid: this.blockId, inputdata64: b64data });
+        if (!data) {
+            return;
+        }
+        this.pendingInputData += data;
+        if (!this.inputFlushScheduled && !this.inputSendInFlight) {
+            this.inputFlushScheduled = true;
+            queueMicrotask(() => {
+                this.inputFlushScheduled = false;
+                this.flushPendingInputData();
+            });
+        }
+    }
+
+    private async flushPendingInputData() {
+        if (this.inputSendInFlight || !this.pendingInputData) {
+            return;
+        }
+        this.inputSendInFlight = true;
+        try {
+            while (this.pendingInputData.length > 0) {
+                const chunk = this.pendingInputData;
+                this.pendingInputData = "";
+                const b64data = stringToBase64(chunk);
+                await RpcApi.ControllerInputCommand(TabRpcClient, { blockid: this.blockId, inputdata64: b64data });
+            }
+        } catch (err) {
+            console.error("[term-model] error sending terminal input:", err);
+        } finally {
+            this.inputSendInFlight = false;
+            if (this.pendingInputData.length > 0 && !this.inputFlushScheduled) {
+                this.inputFlushScheduled = true;
+                queueMicrotask(() => {
+                    this.inputFlushScheduled = false;
+                    this.flushPendingInputData();
+                });
+            }
+        }
     }
 
     setTermMode(mode: "term" | "vdom") {
