@@ -5,6 +5,7 @@ import { Tooltip } from "@/app/element/tooltip";
 import { globalStore } from "@/app/store/jotaiStore";
 import { tryReinjectKey } from "@/app/store/keymodel";
 import { CodeEditor } from "@/app/view/codeeditor/codeeditor";
+import { parseConfigObject } from "@/app/view/waveconfig/visual-config-utils";
 import type { ConfigFile, WaveConfigViewModel } from "@/app/view/waveconfig/waveconfig-model";
 import type { WaveConfigEnv } from "@/app/view/waveconfig/waveconfigenv";
 import { useWaveEnv } from "@/app/waveenv/waveenv";
@@ -110,8 +111,22 @@ const WaveConfigView = memo(({ blockId, model }: ViewComponentProps<WaveConfigVi
     const [isMenuOpen, setIsMenuOpen] = useAtom(model.isMenuOpenAtom);
     const hasChanges = useAtomValue(model.hasEditedAtom);
     const [activeTab, setActiveTab] = useAtom(model.activeTabAtom);
+    const [autoSaveVisual, setAutoSaveVisual] = useAtom(model.autoSaveVisualAtom);
     const fullConfig = useAtomValue(env.atoms.fullConfigAtom);
     const configErrors = fullConfig?.configerrors;
+
+    useEffect(() => {
+        if (!selectedFile || selectedFile.isSecrets) return;
+        if (!globalStore.get(model.hasEditedAtom) && !globalStore.get(model.isSavingAtom)) {
+            model.loadFile(selectedFile, { silent: true });
+        }
+    }, [fullConfig]);
+
+    useEffect(() => {
+        return () => {
+            model.cancelPendingAutoSave();
+        };
+    }, [model]);
 
     const handleContentChange = useCallback(
         (newContent: string) => {
@@ -205,7 +220,20 @@ const WaveConfigView = memo(({ blockId, model }: ViewComponentProps<WaveConfigVi
                                         {selectedFile.path}
                                     </div>
                                 </div>
-                                <div className="flex gap-2 items-baseline shrink-0">
+                                <div className="flex gap-2 items-center shrink-0">
+                                    {selectedFile.visualComponent &&
+                                        selectedFile.hasJsonView &&
+                                        activeTab === "visual" && (
+                                            <label className="flex items-center gap-1.5 text-xs text-secondary cursor-pointer select-none mr-1">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={autoSaveVisual}
+                                                    onChange={(e) => setAutoSaveVisual(e.target.checked)}
+                                                    className="accent-[var(--accent-color)] cursor-pointer"
+                                                />
+                                                <span className="@max-w450:hidden">Auto-save</span>
+                                            </label>
+                                        )}
                                     {selectedFile.hasJsonView && (
                                         <>
                                             {hasChanges && (
@@ -234,8 +262,12 @@ const WaveConfigView = memo(({ blockId, model }: ViewComponentProps<WaveConfigVi
                                 <div className="flex gap-0 border-b border-border">
                                     <button
                                         onClick={() => {
-                                            if (!model.confirmDiscardChanges()) return;
-                                            model.discardChanges();
+                                            const res = parseConfigObject(globalStore.get(model.fileContentAtom));
+                                            if (!res.ok) {
+                                                globalStore.set(model.validationErrorAtom, res.error);
+                                                return;
+                                            }
+                                            model.clearValidationError();
                                             setActiveTab("visual");
                                         }}
                                         className={cn(
@@ -247,7 +279,6 @@ const WaveConfigView = memo(({ blockId, model }: ViewComponentProps<WaveConfigVi
                                     >
                                         Visual
                                     </button>
-                                    {/* No guard needed: visual tab saves changes immediately via RPC */}
                                     <button
                                         onClick={() => setActiveTab("json")}
                                         className={cn(

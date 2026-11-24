@@ -6,7 +6,12 @@ import { globalStore } from "@/app/store/jotaiStore";
 import type { TabModel } from "@/app/store/tab-model";
 import { makeORef } from "@/app/store/wos";
 import { TabRpcClient } from "@/app/store/wshrpcutil";
+import { BackgroundsVisualContent } from "@/app/view/waveconfig/backgroundsvisual";
+import { ConnectionsVisualContent } from "@/app/view/waveconfig/connectionsvisual";
 import { SecretsContent } from "@/app/view/waveconfig/secretscontent";
+import { SettingsVisualContent } from "@/app/view/waveconfig/settingsvisual";
+import { isUnsafeObjectKey } from "@/app/view/waveconfig/visual-config-utils";
+import { WaveAIVisualContent } from "@/app/view/waveconfig/waveaivisual";
 import { WaveConfigView } from "@/app/view/waveconfig/waveconfig";
 import type { WaveConfigEnv } from "@/app/view/waveconfig/waveconfigenv";
 import { base64ToString, stringToBase64 } from "@/util/util";
@@ -42,14 +47,87 @@ function validateAiJson(parsed: any): ValidationResult {
     return { success: true };
 }
 
+function validateSettingsJson(parsed: any): ValidationResult {
+    const intKeys = ["term:scrollback", "window:maxtabcachesize", "term:fontsize", "editor:fontsize"];
+    for (const key of intKeys) {
+        if (Object.hasOwn(parsed, key)) {
+            const val = parsed[key];
+            if (typeof val === "number" && !Number.isInteger(val)) {
+                return { error: `"${key}" must be an integer` };
+            }
+        }
+    }
+    return { success: true };
+}
+
+function validateConnectionsJson(parsed: any): ValidationResult {
+    for (const key of Object.keys(parsed)) {
+        if (isUnsafeObjectKey(key)) {
+            return { error: `Reserved key "${key}" is not allowed` };
+        }
+        const entry = parsed[key];
+        if (entry != null && (typeof entry !== "object" || Array.isArray(entry))) {
+            return { error: `Connection "${key}" must be an object` };
+        }
+        if (entry && Object.hasOwn(entry, "ssh:port") && typeof entry["ssh:port"] !== "string") {
+            return { error: `Connection "${key}": "ssh:port" must be a string (e.g. "22")` };
+        }
+    }
+    return { success: true };
+}
+
+function validateBackgroundsJson(parsed: any): ValidationResult {
+    for (const key of Object.keys(parsed)) {
+        if (isUnsafeObjectKey(key)) {
+            return { error: `Reserved key "${key}" is not allowed` };
+        }
+        const entry = parsed[key];
+        if (entry === null) {
+            continue;
+        }
+        if (typeof entry !== "object" || Array.isArray(entry)) {
+            return { error: `Background "${key}" must be an object or null` };
+        }
+        if (typeof entry["display:name"] !== "string" || entry["display:name"].trim() === "") {
+            return { error: `Background "${key}" requires a non-empty "display:name"` };
+        }
+        if (Object.hasOwn(entry, "bg:opacity")) {
+            const op = entry["bg:opacity"];
+            if (typeof op !== "number" || op < 0 || op > 1) {
+                return { error: `Background "${key}": "bg:opacity" must be a number between 0 and 1` };
+            }
+        }
+    }
+    return { success: true };
+}
+
+const VALID_THINKING_LEVELS = new Set(["low", "medium", "high"]);
+
 function validateWaveAiJson(parsed: any): ValidationResult {
     const keys = Object.keys(parsed);
     const keyPattern = /^[a-zA-Z0-9_@.-]+$/;
     for (const key of keys) {
+        if (isUnsafeObjectKey(key)) {
+            return { error: `Reserved key "${key}" is not allowed` };
+        }
         if (!keyPattern.test(key)) {
             return {
                 error: `Invalid key "${key}": keys must only contain letters, numbers, underscores, @, dots, and hyphens`,
             };
+        }
+        const entry = parsed[key];
+        if (typeof entry !== "object" || entry == null || Array.isArray(entry)) {
+            return { error: `AI mode "${key}" must be an object` };
+        }
+        if (typeof entry["display:name"] !== "string" || entry["display:name"].trim() === "") {
+            return { error: `AI mode "${key}" requires a non-empty "display:name"` };
+        }
+        if (
+            Object.hasOwn(entry, "ai:thinkinglevel") &&
+            typeof entry["ai:thinkinglevel"] === "string" &&
+            !VALID_THINKING_LEVELS.has(entry["ai:thinkinglevel"])
+        ) {
+            return { error: `AI mode "${key}": "ai:thinkinglevel" must be one of low, medium, high` };
         }
     }
     return { success: true };
@@ -62,7 +140,9 @@ function makeConfigFiles(isWindows: boolean): ConfigFile[] {
             path: "settings.json",
             language: "json",
             docsUrl: "https://docs.waveterm.dev/config",
+            validator: validateSettingsJson,
             hasJsonView: true,
+            visualComponent: SettingsVisualContent,
         },
         {
             name: "Connections",
@@ -70,7 +150,9 @@ function makeConfigFiles(isWindows: boolean): ConfigFile[] {
             language: "json",
             docsUrl: "https://docs.waveterm.dev/connections",
             description: isWindows ? "SSH hosts and WSL distros" : "SSH hosts",
+            validator: validateConnectionsJson,
             hasJsonView: true,
+            visualComponent: ConnectionsVisualContent,
         },
         {
             name: "Sidebar Widgets",
@@ -87,14 +169,16 @@ function makeConfigFiles(isWindows: boolean): ConfigFile[] {
             docsUrl: "https://docs.waveterm.dev/waveai-modes",
             validator: validateWaveAiJson,
             hasJsonView: true,
-            // visualComponent: WaveAIVisualContent,
+            visualComponent: WaveAIVisualContent,
         },
         {
             name: "Tab Backgrounds",
             path: "backgrounds.json",
             language: "json",
             docsUrl: "https://docs.waveterm.dev/tab-backgrounds",
+            validator: validateBackgroundsJson,
             hasJsonView: true,
+            visualComponent: BackgroundsVisualContent,
         },
         {
             name: "Secrets",
@@ -147,10 +231,15 @@ export class WaveConfigViewModel implements ViewModel {
     isMenuOpenAtom: PrimitiveAtom<boolean>;
     presetsJsonExistsAtom: PrimitiveAtom<boolean>;
     activeTabAtom: PrimitiveAtom<"visual" | "json">;
+    autoSaveVisualAtom: PrimitiveAtom<boolean>;
     configErrorFilesAtom: Atom<Set<string>>;
     configDir: string;
     saveShortcut: string;
     editorRef: React.RefObject<MonacoTypes.editor.IStandaloneCodeEditor>;
+    private loadSeq = 0;
+    private autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+    private saveInFlight = false;
+    private pendingTrailingSave = false;
 
     secretNamesAtom: PrimitiveAtom<string[]>;
     selectedSecretAtom: PrimitiveAtom<string | null>;
@@ -182,6 +271,7 @@ export class WaveConfigViewModel implements ViewModel {
         this.isMenuOpenAtom = atom(false);
         this.presetsJsonExistsAtom = atom(false);
         this.activeTabAtom = atom<"visual" | "json">("visual");
+        this.autoSaveVisualAtom = atom<boolean>(false);
         this.configErrorFilesAtom = atom((get) => {
             const fullConfig = get(this.env.atoms.fullConfigAtom);
             const errorSet = new Set<string>();
@@ -270,7 +360,38 @@ export class WaveConfigViewModel implements ViewModel {
         return window.confirm("You have unsaved changes. Discard and continue?");
     }
 
+    cancelPendingAutoSave() {
+        if (this.autoSaveTimer != null) {
+            clearTimeout(this.autoSaveTimer);
+            this.autoSaveTimer = null;
+        }
+        this.pendingTrailingSave = false;
+    }
+
+    scheduleAutoSave() {
+        if (!globalStore.get(this.autoSaveVisualAtom)) {
+            return;
+        }
+        if (this.autoSaveTimer != null) {
+            clearTimeout(this.autoSaveTimer);
+        }
+        this.autoSaveTimer = setTimeout(() => {
+            this.autoSaveTimer = null;
+            this.saveFile({ fromAutoSave: true });
+        }, 400);
+    }
+
+    updateContentFromVisual(newContent: string, opts?: { skipAutoSave?: boolean }) {
+        globalStore.set(this.fileContentAtom, newContent);
+        globalStore.set(this.hasEditedAtom, true);
+        globalStore.set(this.validationErrorAtom, null);
+        if (!opts?.skipAutoSave) {
+            this.scheduleAutoSave();
+        }
+    }
+
     discardChanges() {
+        this.cancelPendingAutoSave();
         const originalContent = globalStore.get(this.originalContentAtom);
         globalStore.set(this.fileContentAtom, originalContent);
         globalStore.set(this.hasEditedAtom, false);
@@ -282,9 +403,14 @@ export class WaveConfigViewModel implements ViewModel {
         globalStore.set(this.hasEditedAtom, true);
     }
 
-    async loadFile(file: ConfigFile) {
-        globalStore.set(this.isLoadingAtom, true);
+    async loadFile(file: ConfigFile, opts?: { silent?: boolean }) {
+        this.cancelPendingAutoSave();
+        const seq = ++this.loadSeq;
+        if (!opts?.silent) {
+            globalStore.set(this.isLoadingAtom, true);
+        }
         globalStore.set(this.errorMessageAtom, null);
+        globalStore.set(this.validationErrorAtom, null);
         globalStore.set(this.hasEditedAtom, false);
 
         if (file.isSecrets) {
@@ -304,12 +430,21 @@ export class WaveConfigViewModel implements ViewModel {
             const fileInfo = await this.env.rpc.FileInfoCommand(TabRpcClient, {
                 info: { path: fullPath },
             });
+            if (seq !== this.loadSeq) {
+                return;
+            }
             let content = "";
             if (!fileInfo?.notfound) {
                 const fileData = await this.env.rpc.FileReadCommand(TabRpcClient, {
                     info: { path: fullPath },
                 });
+                if (seq !== this.loadSeq) {
+                    return;
+                }
                 content = fileData?.data64 ? base64ToString(fileData.data64) : "";
+            }
+            if (opts?.silent && globalStore.get(this.hasEditedAtom)) {
+                return;
             }
             globalStore.set(this.originalContentAtom, content);
             if (content.trim() === "") {
@@ -318,52 +453,79 @@ export class WaveConfigViewModel implements ViewModel {
                 globalStore.set(this.fileContentAtom, content);
             }
             globalStore.set(this.selectedFileAtom, file);
-            this.env.rpc.SetMetaCommand(TabRpcClient, {
-                oref: makeORef("block", this.blockId),
-                meta: { file: file.path },
-            });
+            if (!opts?.silent) {
+                globalStore.set(this.activeTabAtom, file.visualComponent ? "visual" : "json");
+                this.env.rpc.SetMetaCommand(TabRpcClient, {
+                    oref: makeORef("block", this.blockId),
+                    meta: { file: file.path },
+                });
+            }
         } catch (err) {
+            if (seq !== this.loadSeq) {
+                return;
+            }
             globalStore.set(this.errorMessageAtom, `Failed to load ${file.name}: ${err.message || String(err)}`);
             globalStore.set(this.fileContentAtom, "");
             globalStore.set(this.originalContentAtom, "");
         } finally {
-            globalStore.set(this.isLoadingAtom, false);
+            if (seq === this.loadSeq && !opts?.silent) {
+                globalStore.set(this.isLoadingAtom, false);
+            }
         }
     }
 
-    async saveFile() {
+    async saveFile(opts?: { fromAutoSave?: boolean }) {
+        if (!opts?.fromAutoSave) {
+            this.cancelPendingAutoSave();
+        }
         const selectedFile = globalStore.get(this.selectedFileAtom);
-        if (!selectedFile) return;
+        if (!selectedFile || selectedFile.isSecrets) return;
 
-        const fileContent = globalStore.get(this.fileContentAtom);
+        if (this.saveInFlight) {
+            this.pendingTrailingSave = true;
+            return;
+        }
 
-        if (fileContent.trim() === "") {
+        const targetFilePath = selectedFile.path;
+        const contentSnapshot = globalStore.get(this.fileContentAtom);
+
+        if (contentSnapshot.trim() === "") {
+            this.saveInFlight = true;
             globalStore.set(this.isSavingAtom, true);
             globalStore.set(this.errorMessageAtom, null);
             globalStore.set(this.validationErrorAtom, null);
 
             try {
-                const fullPath = `${this.configDir}/${selectedFile.path}`;
+                const fullPath = `${this.configDir}/${targetFilePath}`;
                 await this.env.rpc.FileWriteCommand(TabRpcClient, {
                     info: { path: fullPath },
                     data64: stringToBase64(""),
                 });
-                globalStore.set(this.fileContentAtom, "");
-                globalStore.set(this.originalContentAtom, "");
-                globalStore.set(this.hasEditedAtom, false);
+                const curFile = globalStore.get(this.selectedFileAtom);
+                const curContent = globalStore.get(this.fileContentAtom);
+                if (curFile?.path === targetFilePath && curContent === contentSnapshot) {
+                    globalStore.set(this.fileContentAtom, "");
+                    globalStore.set(this.originalContentAtom, "");
+                    globalStore.set(this.hasEditedAtom, false);
+                }
             } catch (err) {
                 globalStore.set(
                     this.errorMessageAtom,
                     `Failed to save ${selectedFile.name}: ${err.message || String(err)}`
                 );
             } finally {
+                this.saveInFlight = false;
                 globalStore.set(this.isSavingAtom, false);
+                if (this.pendingTrailingSave) {
+                    this.pendingTrailingSave = false;
+                    this.saveFile({ fromAutoSave: true });
+                }
             }
             return;
         }
 
         try {
-            const parsed = JSON.parse(fileContent);
+            const parsed = JSON.parse(contentSnapshot);
 
             if (typeof parsed !== "object" || parsed == null || Array.isArray(parsed)) {
                 globalStore.set(this.validationErrorAtom, "JSON must be an object, not an array, primitive, or null");
@@ -380,26 +542,40 @@ export class WaveConfigViewModel implements ViewModel {
 
             const formatted = JSON.stringify(parsed, null, 2);
 
+            this.saveInFlight = true;
             globalStore.set(this.isSavingAtom, true);
             globalStore.set(this.errorMessageAtom, null);
             globalStore.set(this.validationErrorAtom, null);
 
             try {
-                const fullPath = `${this.configDir}/${selectedFile.path}`;
+                const fullPath = `${this.configDir}/${targetFilePath}`;
                 await this.env.rpc.FileWriteCommand(TabRpcClient, {
                     info: { path: fullPath },
                     data64: stringToBase64(formatted),
                 });
-                globalStore.set(this.fileContentAtom, formatted);
-                globalStore.set(this.originalContentAtom, formatted);
-                globalStore.set(this.hasEditedAtom, false);
+                const curFile = globalStore.get(this.selectedFileAtom);
+                const curContent = globalStore.get(this.fileContentAtom);
+                if (curFile?.path === targetFilePath && curContent === contentSnapshot) {
+                    globalStore.set(this.fileContentAtom, formatted);
+                    globalStore.set(this.originalContentAtom, formatted);
+                    globalStore.set(this.hasEditedAtom, false);
+                } else if (curFile?.path === targetFilePath) {
+                    this.pendingTrailingSave = true;
+                }
             } catch (err) {
                 globalStore.set(
                     this.errorMessageAtom,
                     `Failed to save ${selectedFile.name}: ${err.message || String(err)}`
                 );
             } finally {
+                this.saveInFlight = false;
                 globalStore.set(this.isSavingAtom, false);
+                if (this.pendingTrailingSave && globalStore.get(this.autoSaveVisualAtom)) {
+                    this.pendingTrailingSave = false;
+                    this.saveFile({ fromAutoSave: true });
+                } else {
+                    this.pendingTrailingSave = false;
+                }
             }
         } catch (err) {
             globalStore.set(this.validationErrorAtom, `Invalid JSON: ${err.message || String(err)}`);
@@ -427,6 +603,47 @@ export class WaveConfigViewModel implements ViewModel {
             }
         } catch (error) {
             globalStore.set(this.storageBackendErrorAtom, `Error checking storage backend: ${error.message}`);
+        }
+    }
+
+    async fetchSecretNamesQuietly(): Promise<string[]> {
+        try {
+            await this.checkStorageBackend();
+            const names = await this.env.rpc.GetSecretsNamesCommand(TabRpcClient);
+            const list = names || [];
+            globalStore.set(this.secretNamesAtom, list);
+            return list;
+        } catch {
+            return globalStore.get(this.secretNamesAtom);
+        }
+    }
+
+    async createSecretInline(name: string, value: string): Promise<{ ok: true } | { ok: false; error: string }> {
+        const trimmed = name.trim();
+        if (!trimmed) {
+            return { ok: false, error: "Secret name cannot be empty" };
+        }
+        if (!SecretNameRegex.test(trimmed)) {
+            return {
+                ok: false,
+                error: "Invalid secret name: must start with a letter and contain only letters, numbers, and underscores",
+            };
+        }
+        await this.checkStorageBackend();
+        const backendErr = globalStore.get(this.storageBackendErrorAtom);
+        if (backendErr) {
+            return { ok: false, error: backendErr };
+        }
+        const existingNames = await this.fetchSecretNamesQuietly();
+        if (existingNames.includes(trimmed)) {
+            return { ok: false, error: `Secret "${trimmed}" already exists` };
+        }
+        try {
+            await this.env.rpc.SetSecretsCommand(TabRpcClient, { [trimmed]: value });
+            await this.fetchSecretNamesQuietly();
+            return { ok: true };
+        } catch (error: any) {
+            return { ok: false, error: `Failed to save secret: ${error?.message || String(error)}` };
         }
     }
 

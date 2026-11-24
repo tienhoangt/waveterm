@@ -340,7 +340,8 @@ const TerminalView = ({ blockId, model }: ViewComponentProps<TermViewModel>) => 
             {
                 theme: termTheme,
                 fontSize: termFontSize,
-                fontFamily: termSettings?.["term:fontfamily"] ?? connFontFamily ?? "Hack, 'Cascadia Mono', Consolas, monospace",
+                fontFamily:
+                    termSettings?.["term:fontfamily"] ?? connFontFamily ?? "'Cascadia Mono', Consolas, Hack, monospace",
                 drawBoldTextInBrightColors: false,
                 fontWeight: "normal",
                 fontWeightBold: "bold",
@@ -396,7 +397,7 @@ const TerminalView = ({ blockId, model }: ViewComponentProps<TermViewModel>) => 
         }
         const term = termWrap.terminal;
         const newFontFamily =
-            termSettings?.["term:fontfamily"] ?? connFontFamily ?? "Hack, 'Cascadia Mono', Consolas, monospace";
+            termSettings?.["term:fontfamily"] ?? connFontFamily ?? "'Cascadia Mono', Consolas, Hack, monospace";
         const newScrollback = computeScrollback(termSettings, blockData);
         let needsFit = false;
         if (termFontSize != null && term.options.fontSize !== termFontSize) {
