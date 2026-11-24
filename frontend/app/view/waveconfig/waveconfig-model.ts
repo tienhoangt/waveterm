@@ -13,6 +13,7 @@ import { SettingsVisualContent } from "@/app/view/waveconfig/settingsvisual";
 import { isUnsafeObjectKey } from "@/app/view/waveconfig/visual-config-utils";
 import { WaveAIVisualContent } from "@/app/view/waveconfig/waveaivisual";
 import { WaveConfigView } from "@/app/view/waveconfig/waveconfig";
+import { WidgetsVisualContent } from "@/app/view/waveconfig/widgetsvisual";
 import type { WaveConfigEnv } from "@/app/view/waveconfig/waveconfigenv";
 import { base64ToString, stringToBase64 } from "@/util/util";
 import { atom, type Atom, type PrimitiveAtom } from "jotai";
@@ -71,6 +72,25 @@ function validateConnectionsJson(parsed: any): ValidationResult {
         }
         if (entry && Object.hasOwn(entry, "ssh:port") && typeof entry["ssh:port"] !== "string") {
             return { error: `Connection "${key}": "ssh:port" must be a string (e.g. "22")` };
+        }
+    }
+    return { success: true };
+}
+
+function validateWidgetsJson(parsed: any): ValidationResult {
+    for (const key of Object.keys(parsed)) {
+        if (isUnsafeObjectKey(key)) {
+            return { error: `Reserved key "${key}" is not allowed` };
+        }
+        const entry = parsed[key];
+        if (entry === null) {
+            continue;
+        }
+        if (typeof entry !== "object" || Array.isArray(entry)) {
+            return { error: `Widget "${key}" must be an object or null` };
+        }
+        if (!entry.blockdef || typeof entry.blockdef !== "object" || Array.isArray(entry.blockdef)) {
+            return { error: `Widget "${key}" requires a "blockdef" object` };
         }
     }
     return { success: true };
@@ -159,7 +179,9 @@ function makeConfigFiles(isWindows: boolean): ConfigFile[] {
             path: "widgets.json",
             language: "json",
             docsUrl: "https://docs.waveterm.dev/customwidgets",
+            validator: validateWidgetsJson,
             hasJsonView: true,
+            visualComponent: WidgetsVisualContent,
         },
         {
             name: "Wave AI Modes",

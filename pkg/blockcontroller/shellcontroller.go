@@ -212,7 +212,14 @@ func (sc *ShellController) resetTerminalState(logCtx context.Context) {
 	}
 	blocklogger.Debugf(logCtx, "[conndebug] resetTerminalState: resetting terminal state\n")
 	resetSeq := shellutil.GetTerminalResetSeq()
-	resetSeq += "\r\n"
+	if runtime.GOOS == "windows" && (sc.ConnName == "" || sc.ConnName == ConnType_Local || strings.HasPrefix(sc.ConnName, "local:")) {
+		// Windows ConPTY initializes a new shell cursor at row 1, col 1 without clearing the viewport;
+		// clear visible screen and home cursor so the restored viewport does not overlap the new prompt
+		// (earlier scrollback above the viewport remains intact).
+		resetSeq += "\x1b[2J\x1b[H"
+	} else {
+		resetSeq += "\r\n"
+	}
 	err := HandleAppendBlockFile(sc.BlockId, wavebase.BlockFile_Term, []byte(resetSeq))
 	if err != nil {
 		log.Printf("error appending to blockfile (terminal reset): %v\n", err)
