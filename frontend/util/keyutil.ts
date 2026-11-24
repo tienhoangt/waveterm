@@ -23,6 +23,9 @@ function keydownWrapper(
 ): (event: KeyboardEvent | React.KeyboardEvent) => void {
     return (event: KeyboardEvent | React.KeyboardEvent) => {
         const waveEvent = adaptFromReactOrNativeKeyEvent(event);
+        if (isImeComposingEvent(waveEvent)) {
+            return;
+        }
         const rtnVal = fn(waveEvent);
         if (rtnVal) {
             event.preventDefault();
@@ -174,7 +177,14 @@ const inputKeyMap = new Map<string, boolean>([
     ["Cmd:Shift:ArrowDown", true],
 ]);
 
+function isImeComposingEvent(event: WaveKeyboardEvent): boolean {
+    return Boolean(event.isComposing || event.keyCode === 229 || event.key === "Process" || event.key === "Dead");
+}
+
 function isInputEvent(event: WaveKeyboardEvent): boolean {
+    if (isImeComposingEvent(event)) {
+        return true;
+    }
     if (isCharacterKeyEvent(event)) {
         return true;
     }
@@ -246,6 +256,9 @@ function adaptFromReactOrNativeKeyEvent(event: React.KeyboardEvent | KeyboardEve
         rtn.type = "unknown";
     }
     rtn.repeat = event.repeat;
+    const rawEvent = (event as any).nativeEvent ?? event;
+    rtn.isComposing = Boolean(rawEvent?.isComposing);
+    rtn.keyCode = typeof rawEvent?.keyCode === "number" ? rawEvent.keyCode : undefined;
     return rtn;
 }
 
@@ -268,6 +281,7 @@ function adaptFromElectronKeyEvent(event: any): WaveKeyboardEvent {
     rtn.location = event.location;
     rtn.code = event.code;
     rtn.key = event.key;
+    rtn.isComposing = Boolean(event.isComposing);
     return rtn;
 }
 
@@ -327,6 +341,7 @@ export {
     checkKeyPressed,
     getKeyUtilPlatform,
     isCharacterKeyEvent,
+    isImeComposingEvent,
     isInputEvent,
     keyboardEventToASCII,
     keydownWrapper,

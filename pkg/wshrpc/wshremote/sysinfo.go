@@ -62,11 +62,17 @@ func generateSingleServerData(client *wshutil.WshRpc, connName string) {
 }
 
 func RunSysInfoLoop(client *wshutil.WshRpc, connName string) {
+	RunSysInfoLoopWithPredicate(client, connName, nil)
+}
+
+func RunSysInfoLoopWithPredicate(client *wshutil.WshRpc, connName string, shouldPoll func() bool) {
 	defer func() {
 		log.Printf("sysinfo loop ended conn:%s\n", connName)
 	}()
 	for {
-		generateSingleServerData(client, connName)
+		if shouldPoll == nil || shouldPoll() {
+			generateSingleServerData(client, connName)
+		}
 		time.Sleep(1 * time.Second)
 	}
 }

@@ -97,6 +97,10 @@ func getTermScrollbackOutput(tabId string, widgetId string, rpcData wshrpc.Comma
 		&wshrpc.RpcOpts{Route: wshutil.MakeFeBlockRouteId(fullBlockId)},
 	)
 	if err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "no route for") && strings.Contains(errStr, wshutil.RoutePrefix_FeBlock) {
+			return nil, fmt.Errorf("terminal widget %s is on an inactive or evicted tab and is not currently loaded in the UI; please switch to or focus that tab before reading its scrollback", widgetId)
+		}
 		return nil, err
 	}
 

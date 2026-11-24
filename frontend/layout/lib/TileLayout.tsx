@@ -230,11 +230,16 @@ const DisplayNode = ({ layoutModel, node }: DisplayNodeProps) => {
     const isEphemeral = useAtomValue(nodeModel.isEphemeral);
     const isMagnified = useAtomValue(nodeModel.isMagnified);
 
+    const generatePreviewImageRef = useRef<() => void>(null);
+
     const [{ isDragging }, drag, dragPreview] = useDrag(
         () => ({
             type: tileItemType,
             canDrag: () => !(isEphemeral || isMagnified),
-            item: () => node,
+            item: () => {
+                generatePreviewImageRef.current?.();
+                return node;
+            },
             collect: (monitor) => ({
                 isDragging: monitor.isDragging(),
             }),
@@ -243,8 +248,10 @@ const DisplayNode = ({ layoutModel, node }: DisplayNodeProps) => {
     );
 
     const [previewElementGeneration, setPreviewElementGeneration] = useState(0);
+    useEffect(() => {
+        setPreviewElementGeneration((gen) => gen + 1);
+    }, [devicePixelRatio, nodeModel]);
     const previewElement = useMemo(() => {
-        setPreviewElementGeneration(previewElementGeneration + 1);
         return (
             <div key="preview" className="tile-preview-container">
                 <div
@@ -280,12 +287,12 @@ const DisplayNode = ({ layoutModel, node }: DisplayNodeProps) => {
         }
     }, [
         dragPreview,
-        previewRef.current,
         previewElementGeneration,
         previewImageGeneration,
         previewImage,
         devicePixelRatio,
     ]);
+    generatePreviewImageRef.current = generatePreviewImage;
 
     const leafContent = useMemo(() => {
         return (
@@ -309,7 +316,6 @@ const DisplayNode = ({ layoutModel, node }: DisplayNodeProps) => {
             ref={tileNodeRef}
             id={node.id}
             style={addlProps?.transform}
-            onPointerEnter={generatePreviewImage}
             onPointerOver={(event) => event.stopPropagation()}
         >
             {leafContent}

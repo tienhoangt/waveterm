@@ -11,8 +11,7 @@
     width: 100vw;
     -webkit-app-region: drag;
     height: max(33px, calc(33px * var(--zoomfactor-inv)));
-    backdrop-filter: blur(20px);
-    background: rgba(0, 0, 0, 0.35);
+    background: var(--main-bg-color);
     flex-shrink: 0;
 
     button {
@@ -57,4 +56,9 @@
         --os-handle-interactive-area-offset: 0px;
         --os-handle-border-radius: 2px;
     }
+}
+
+.is-transparent .tab-bar-wrapper {
+    backdrop-filter: blur(20px);
+    background: rgba(0, 0, 0, 0.35);
 }

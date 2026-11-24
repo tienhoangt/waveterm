@@ -271,6 +271,9 @@ func GoRecordTEventWrap(tevent *telemetrydata.TEvent) {
 }
 
 func RecordTEvent(ctx context.Context, tevent *telemetrydata.TEvent) error {
+	if !IsTelemetryEnabled() {
+		return nil
+	}
 	if tevent == nil {
 		return nil
 	}
@@ -345,6 +348,9 @@ func MarkTEventsAsUploaded(ctx context.Context, events []*telemetrydata.TEvent) 
 }
 
 func UpdateActivity(ctx context.Context, update wshrpc.ActivityUpdate) error {
+	if !IsTelemetryEnabled() {
+		return nil
+	}
 	now := time.Now()
 	dayStr := daystr.GetCurDayStr()
 	txErr := wstore.WithTx(ctx, func(tx *wstore.TxWrap) error {

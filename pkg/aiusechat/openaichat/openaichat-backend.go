@@ -48,12 +48,24 @@ func RunChatStep(
 	var messages []ChatRequestMessage
 
 	// Convert native messages
+	hasAnyReasoning := false
 	for _, genMsg := range chat.NativeMessages {
 		chatMsg, ok := genMsg.(*StoredChatMessage)
 		if !ok {
 			return nil, nil, nil, fmt.Errorf("expected StoredChatMessage, got %T", genMsg)
 		}
-		messages = append(messages, *chatMsg.Message.clean())
+		cleaned := *chatMsg.Message.clean()
+		if cleaned.HasReasoningContent || cleaned.ReasoningContent != "" {
+			hasAnyReasoning = true
+		}
+		messages = append(messages, cleaned)
+	}
+	if hasAnyReasoning {
+		for i := range messages {
+			if messages[i].Role == "assistant" && len(messages[i].ToolCalls) > 0 {
+				messages[i].HasReasoningContent = true
+			}
+		}
 	}
 
 	req, err := buildChatHTTPRequest(ctx, messages, chatOpts)
@@ -103,11 +115,13 @@ func processChatStream(
 	var textBuilder strings.Builder
 	var reasoningBuilder strings.Builder
 	reasoningStarted := false
+	sawReasoningField := false
 	msgID := uuid.New().String()
 	textID := uuid.New().String()
 	var finishReason string
 	textStarted := false
 	var toolCallsInProgress []ToolCall
+	var toolCallArgBuilders []strings.Builder
 
 	if cont == nil {
 		_ = sseHandler.AiMsgStart(msgID)
@@ -175,12 +189,15 @@ func processChatStream(
 		}
 
 		if choice.Delta.ReasoningContent != "" {
+			sawReasoningField = true
 			if !reasoningStarted {
 				reasoningStarted = true
 				_ = sseHandler.AiMsgReasoningStart(msgID)
 			}
 			reasoningBuilder.WriteString(choice.Delta.ReasoningContent)
 			_ = sseHandler.AiMsgReasoningDelta(msgID, choice.Delta.ReasoningContent)
+		} else if strings.Contains(data, `"reasoning_content"`) {
+			sawReasoningField = true
 		}
 
 		if len(choice.Delta.ToolCalls) > 0 {
@@ -188,6 +205,7 @@ func processChatStream(
 				idx := tcDelta.Index
 				for len(toolCallsInProgress) <= idx {
 					toolCallsInProgress = append(toolCallsInProgress, ToolCall{Type: "function"})
+					toolCallArgBuilders = append(toolCallArgBuilders, strings.Builder{})
 				}
 
 				tc := &toolCallsInProgress[idx]
@@ -202,7 +220,7 @@ func processChatStream(
 						tc.Function.Name = tcDelta.Function.Name
 					}
 					if tcDelta.Function.Arguments != "" {
-						tc.Function.Arguments += tcDelta.Function.Arguments
+						toolCallArgBuilders[idx].WriteString(tcDelta.Function.Arguments)
 					}
 				}
 			}
@@ -210,6 +228,12 @@ func processChatStream(
 
 		if choice.FinishReason != nil && *choice.FinishReason != "" {
 			finishReason = *choice.FinishReason
+		}
+	}
+
+	for idx := range toolCallsInProgress {
+		if idx < len(toolCallArgBuilders) && toolCallArgBuilders[idx].Len() > 0 {
+			toolCallsInProgress[idx].Function.Arguments = toolCallArgBuilders[idx].String()
 		}
 	}
 
@@ -254,8 +278,9 @@ func processChatStream(
 	assistantMsg := &StoredChatMessage{
 		MessageId: msgID,
 		Message: ChatRequestMessage{
-			Role:             "assistant",
-			ReasoningContent: reasoningBuilder.String(),
+			Role:                "assistant",
+			ReasoningContent:    reasoningBuilder.String(),
+			HasReasoningContent: sawReasoningField || reasoningBuilder.Len() > 0,
 		},
 	}
 

@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net"
@@ -18,7 +19,9 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -584,7 +587,13 @@ func lineContainsMatch(line []byte, matches [][]byte) bool {
 	return false
 }
 
-func createHostKeyCallback(ctx context.Context, sshKeywords *wconfig.ConnKeywords) (ssh.HostKeyCallback, HostKeyAlgorithms, error) {
+func createHostKeyCallback(ctx context.Context, sshKeywords *wconfig.ConnKeywords, strictHostKeyChecking string) (ssh.HostKeyCallback, HostKeyAlgorithms, error) {
+	strictMode := strings.ToLower(strings.TrimSpace(strictHostKeyChecking))
+	if strictMode == "no" || strictMode == "off" {
+		blocklogger.Infof(ctx, "[conndebug] StrictHostKeyChecking=%s: skipping host key verification\n", strictMode)
+		return ssh.InsecureIgnoreHostKey(), func(hostWithPort string) []string { return nil }, nil
+	}
+
 	globalKnownHostsFiles := sshKeywords.SshGlobalKnownHostsFile
 	userKnownHostsFiles := sshKeywords.SshUserKnownHostsFile
 
@@ -674,12 +683,18 @@ func createHostKeyCallback(ctx context.Context, sshKeywords *wconfig.ConnKeyword
 		serr, _ := err.(*xknownhosts.KeyError)
 		if len(serr.Want) == 0 {
 			// the key was not found
+			if strictMode == "yes" {
+				return utilds.Errorf(ConnErrCode_HostKeyVerify, "host key for %s not found in known_hosts (StrictHostKeyChecking=yes)", hostname)
+			}
 
 			// try to write to a file that could be read
 			err := fmt.Errorf("placeholder, should not be returned") // a null value here can cause problems with empty slice
 			for _, filename := range knownHostsFiles {
 				newLine := xknownhosts.Line([]string{xknownhosts.Normalize(hostname)}, key)
-				getUserVerification := createUnknownKeyVerifier(ctx, filename, hostname, remote.String(), key)
+				var getUserVerification func() (*userinput.UserInputResponse, error)
+				if strictMode != "accept-new" {
+					getUserVerification = createUnknownKeyVerifier(ctx, filename, hostname, remote.String(), key)
+				}
 				err = writeToKnownHosts(filename, newLine, getUserVerification)
 				if err == nil {
 					break
@@ -694,7 +709,10 @@ func createHostKeyCallback(ctx context.Context, sshKeywords *wconfig.ConnKeyword
 			if err != nil {
 				for _, filename := range unreadableFiles {
 					newLine := xknownhosts.Line([]string{xknownhosts.Normalize(hostname)}, key)
-					getUserVerification := createMissingKnownHostsVerifier(filename, hostname, remote.String(), key)
+					var getUserVerification func() (*userinput.UserInputResponse, error)
+					if strictMode != "accept-new" {
+						getUserVerification = createMissingKnownHostsVerifier(filename, hostname, remote.String(), key)
+					}
 					err = writeToKnownHosts(filename, newLine, getUserVerification)
 					if err == nil {
 						knownHostsFiles = []string{filename}
@@ -754,7 +772,7 @@ func createHostKeyCallback(ctx context.Context, sshKeywords *wconfig.ConnKeyword
 	return waveHostKeyCallback, hostKeyAlgorithms, nil
 }
 
-func createClientConfig(connCtx context.Context, sshKeywords *wconfig.ConnKeywords, debugInfo *ConnectionDebugInfo) (*ssh.ClientConfig, error) {
+func createClientConfig(connCtx context.Context, sshKeywords *wconfig.ConnKeywords, debugInfo *ConnectionDebugInfo, strictHostKeyChecking string) (*ssh.ClientConfig, error) {
 	chosenUser := utilfn.SafeDeref(sshKeywords.SshUser)
 	chosenHostName := utilfn.SafeDeref(sshKeywords.SshHostName)
 	chosenPort := utilfn.SafeDeref(sshKeywords.SshPort)
@@ -824,7 +842,7 @@ func createClientConfig(connCtx context.Context, sshKeywords *wconfig.ConnKeywor
 		authMethods = append(authMethods, authMethod)
 	}
 
-	hostKeyCallback, hostKeyAlgorithms, err := createHostKeyCallback(connCtx, sshKeywords)
+	hostKeyCallback, hostKeyAlgorithms, err := createHostKeyCallback(connCtx, sshKeywords, strictHostKeyChecking)
 	if err != nil {
 		return nil, err
 	}
@@ -838,17 +856,259 @@ func createClientConfig(connCtx context.Context, sshKeywords *wconfig.ConnKeywor
 	}, nil
 }
 
-func connectInternal(ctx context.Context, networkAddr string, clientConfig *ssh.ClientConfig, currentClient *ssh.Client) (*ssh.Client, error) {
+var (
+	proxyHostAllowlistRe = regexp.MustCompile(`^[a-zA-Z0-9._:-]+$`)
+	proxyUserAllowlistRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+)
+
+func validateProxyHost(host string) error {
+	if host == "" || strings.HasPrefix(host, "-") || !proxyHostAllowlistRe.MatchString(host) {
+		return fmt.Errorf("invalid ProxyCommand host token %q", host)
+	}
+	return nil
+}
+
+func validateProxyPort(port string) error {
+	if port == "" {
+		return fmt.Errorf("invalid ProxyCommand port token %q", port)
+	}
+	for i := 0; i < len(port); i++ {
+		if port[i] < '0' || port[i] > '9' {
+			return fmt.Errorf("invalid ProxyCommand port token %q", port)
+		}
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil || p < 1 || p > 65535 {
+		return fmt.Errorf("invalid ProxyCommand port token %q", port)
+	}
+	return nil
+}
+
+func validateProxyUser(userName string) error {
+	if userName == "" || strings.HasPrefix(userName, "-") || !proxyUserAllowlistRe.MatchString(userName) {
+		return fmt.Errorf("invalid ProxyCommand user token %q", userName)
+	}
+	return nil
+}
+
+// splitProxyCommandArgs performs quote-aware argv splitting without invoking a shell.
+func splitProxyCommandArgs(cmdStr string) ([]string, error) {
+	var args []string
+	var current strings.Builder
+	inToken := false
+	inSingle := false
+	inDouble := false
+
+	for i := 0; i < len(cmdStr); i++ {
+		ch := cmdStr[i]
+		if inSingle {
+			if ch == '\'' {
+				inSingle = false
+			} else {
+				current.WriteByte(ch)
+			}
+			continue
+		}
+		if inDouble {
+			if ch == '"' {
+				inDouble = false
+			} else if ch == '\\' && i+1 < len(cmdStr) && (cmdStr[i+1] == '"' || cmdStr[i+1] == '\\') {
+				i++
+				current.WriteByte(cmdStr[i])
+			} else {
+				current.WriteByte(ch)
+			}
+			continue
+		}
+		switch ch {
+		case ' ', '\t', '\r', '\n':
+			if inToken {
+				args = append(args, current.String())
+				current.Reset()
+				inToken = false
+			}
+		case '\'':
+			inSingle = true
+			inToken = true
+		case '"':
+			inDouble = true
+			inToken = true
+		case '\\':
+			inToken = true
+			if i+1 < len(cmdStr) && (cmdStr[i+1] == ' ' || cmdStr[i+1] == '\t' || cmdStr[i+1] == '"' || cmdStr[i+1] == '\'' || cmdStr[i+1] == '\\') {
+				i++
+				current.WriteByte(cmdStr[i])
+			} else {
+				current.WriteByte(ch)
+			}
+		default:
+			inToken = true
+			current.WriteByte(ch)
+		}
+	}
+	if inSingle || inDouble {
+		return nil, fmt.Errorf("unterminated quote in ProxyCommand")
+	}
+	if inToken {
+		args = append(args, current.String())
+	}
+	if len(args) == 0 {
+		return nil, fmt.Errorf("empty ProxyCommand")
+	}
+	return args, nil
+}
+
+func expandProxyCommandTokens(rawArgs []string, host, port, userName string) ([]string, error) {
+	expanded := make([]string, len(rawArgs))
+	for idx, arg := range rawArgs {
+		var b strings.Builder
+		for i := 0; i < len(arg); i++ {
+			if arg[i] != '%' {
+				b.WriteByte(arg[i])
+				continue
+			}
+			if i+1 >= len(arg) {
+				return nil, fmt.Errorf("trailing '%%' in ProxyCommand argument %q", arg)
+			}
+			i++
+			switch arg[i] {
+			case '%':
+				b.WriteByte('%')
+			case 'h':
+				if err := validateProxyHost(host); err != nil {
+					return nil, err
+				}
+				b.WriteString(host)
+			case 'p':
+				if err := validateProxyPort(port); err != nil {
+					return nil, err
+				}
+				b.WriteString(port)
+			case 'r':
+				if err := validateProxyUser(userName); err != nil {
+					return nil, err
+				}
+				b.WriteString(userName)
+			default:
+				return nil, fmt.Errorf("unsupported ProxyCommand token '%%%c'", arg[i])
+			}
+		}
+		expanded[idx] = b.String()
+	}
+	return expanded, nil
+}
+
+func buildProxyCommandArgs(proxyCmd, host, port, userName string) ([]string, error) {
+	rawArgs, err := splitProxyCommandArgs(proxyCmd)
+	if err != nil {
+		return nil, err
+	}
+	return expandProxyCommandTokens(rawArgs, host, port, userName)
+}
+
+type proxyAddr struct {
+	addr string
+}
+
+func (a proxyAddr) Network() string { return "proxycommand" }
+func (a proxyAddr) String() string  { return a.addr }
+
+type proxyCmdConn struct {
+	cmd        *exec.Cmd
+	cancel     context.CancelFunc
+	stdin      io.WriteCloser
+	stdout     io.ReadCloser
+	remoteAddr net.Addr
+	closeOnce  sync.Once
+}
+
+func (c *proxyCmdConn) Read(p []byte) (int, error) {
+	return c.stdout.Read(p)
+}
+
+func (c *proxyCmdConn) Write(p []byte) (int, error) {
+	return c.stdin.Write(p)
+}
+
+func (c *proxyCmdConn) Close() error {
+	var firstErr error
+	c.closeOnce.Do(func() {
+		c.cancel()
+		if err := c.stdin.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if err := c.stdout.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		killProxyCmdProcess(c.cmd)
+		go func() {
+			_ = c.cmd.Wait()
+		}()
+	})
+	return firstErr
+}
+
+func (c *proxyCmdConn) LocalAddr() net.Addr                { return proxyAddr{addr: "local"} }
+func (c *proxyCmdConn) RemoteAddr() net.Addr               { return c.remoteAddr }
+func (c *proxyCmdConn) SetDeadline(t time.Time) error      { return nil }
+func (c *proxyCmdConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *proxyCmdConn) SetWriteDeadline(t time.Time) error { return nil }
+
+func dialProxyCommand(ctx context.Context, proxyCmd, host, port, userName string) (net.Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	argv, err := buildProxyCommandArgs(proxyCmd, host, port, userName)
+	if err != nil {
+		return nil, err
+	}
+	proxyCtx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(proxyCtx, argv[0], argv[1:]...)
+	configureProxyCmdSysProcAttr(cmd)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("proxycommand stdin pipe: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("proxycommand stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("proxycommand start %q: %w", argv[0], err)
+	}
+	return &proxyCmdConn{
+		cmd:        cmd,
+		cancel:     cancel,
+		stdin:      stdin,
+		stdout:     stdout,
+		remoteAddr: proxyAddr{addr: host + ":" + port},
+	}, nil
+}
+
+func connectInternal(ctx context.Context, networkAddr string, clientConfig *ssh.ClientConfig, currentClient *ssh.Client, proxyCmd string, host string, port string, userName string) (*ssh.Client, error) {
 	var clientConn net.Conn
 	var err error
 	if currentClient == nil {
-		d := net.Dialer{Timeout: clientConfig.Timeout}
-		blocklogger.Infof(ctx, "[conndebug] ssh dial %s\n", networkAddr)
-		clientConn, err = d.DialContext(ctx, "tcp", networkAddr)
-		if err != nil {
-			subCode := ClassifyDialErrorSubCode(err)
-			blocklogger.Infof(ctx, "[conndebug] ERROR dial error [%s]: %v\n", subCode, err)
-			return nil, utilds.MakeSubCodedError(ConnErrCode_Dial, subCode, err)
+		if proxyCmd != "" {
+			blocklogger.Infof(ctx, "[conndebug] ssh dial via ProxyCommand for %s\n", networkAddr)
+			clientConn, err = dialProxyCommand(ctx, proxyCmd, host, port, userName)
+			if err != nil {
+				subCode := ClassifyDialErrorSubCode(err)
+				blocklogger.Infof(ctx, "[conndebug] ERROR proxycommand dial error [%s]: %v\n", subCode, err)
+				return nil, utilds.MakeSubCodedError(ConnErrCode_Dial, subCode, err)
+			}
+		} else {
+			d := net.Dialer{Timeout: clientConfig.Timeout}
+			blocklogger.Infof(ctx, "[conndebug] ssh dial %s\n", networkAddr)
+			clientConn, err = d.DialContext(ctx, "tcp", networkAddr)
+			if err != nil {
+				subCode := ClassifyDialErrorSubCode(err)
+				blocklogger.Infof(ctx, "[conndebug] ERROR dial error [%s]: %v\n", subCode, err)
+				return nil, utilds.MakeSubCodedError(ConnErrCode_Dial, subCode, err)
+			}
 		}
 	} else {
 		blocklogger.Infof(ctx, "[conndebug] ssh dial (from client) %s\n", networkAddr)
@@ -861,6 +1121,7 @@ func connectInternal(ctx context.Context, networkAddr string, clientConfig *ssh.
 	}
 	c, chans, reqs, err := ssh.NewClientConn(clientConn, networkAddr, clientConfig)
 	if err != nil {
+		_ = clientConn.Close()
 		blocklogger.Infof(ctx, "[conndebug] ERROR ssh auth/negotiation: %s\n", SimpleMessageFromPossibleConnectionError(err))
 		return nil, err
 	}
@@ -887,6 +1148,8 @@ func ConnectToClient(connCtx context.Context, opts *SSHOpts, currentClient *ssh.
 	}
 
 	var sshConfigKeywords *wconfig.ConnKeywords
+	var proxyCommand string
+	var strictHostKeyChecking string
 	if utilfn.SafeDeref(internalSshConfigKeywords.ConnIgnoreSshConfig) {
 		var err error
 		sshConfigKeywords, err = findSshDefaults(opts.SSHHost)
@@ -900,6 +1163,17 @@ func ConnectToClient(connCtx context.Context, opts *SSHOpts, currentClient *ssh.
 		if err != nil {
 			err = utilds.MakeCodedError(ConnErrCode_ConfigParse, fmt.Errorf("cannot determine config keywords: %w", err))
 			return nil, debugInfo.JumpNum, ConnectionError{ConnectionDebugInfo: debugInfo, Err: err}
+		}
+		// Security: ProxyCommand and StrictHostKeyChecking are read exclusively from ~/.ssh/config
+		// and are never overridable via untrusted RPC flags.
+		if pcRaw, pcErr := WaveSshConfigUserSettings().GetStrict(opts.SSHHost, "ProxyCommand"); pcErr == nil {
+			pcTrimmed := strings.TrimSpace(pcRaw)
+			if pcTrimmed != "" && !strings.EqualFold(pcTrimmed, "none") {
+				proxyCommand = pcTrimmed
+			}
+		}
+		if shkcRaw, shkcErr := WaveSshConfigUserSettings().GetStrict(opts.SSHHost, "StrictHostKeyChecking"); shkcErr == nil {
+			strictHostKeyChecking = strings.ToLower(trimquotes.TryTrimQuotes(strings.TrimSpace(shkcRaw)))
 		}
 	}
 
@@ -946,12 +1220,15 @@ func ConnectToClient(connCtx context.Context, opts *SSHOpts, currentClient *ssh.
 			return nil, jumpNum, err
 		}
 	}
-	clientConfig, err := createClientConfig(connCtx, sshKeywords, debugInfo)
+	clientConfig, err := createClientConfig(connCtx, sshKeywords, debugInfo, strictHostKeyChecking)
 	if err != nil {
 		return nil, debugInfo.JumpNum, ConnectionError{ConnectionDebugInfo: debugInfo, Err: err}
 	}
-	networkAddr := utilfn.SafeDeref(sshKeywords.SshHostName) + ":" + utilfn.SafeDeref(sshKeywords.SshPort)
-	client, err := connectInternal(connCtx, networkAddr, clientConfig, debugInfo.CurrentClient)
+	chosenHost := utilfn.SafeDeref(sshKeywords.SshHostName)
+	chosenPort := utilfn.SafeDeref(sshKeywords.SshPort)
+	chosenUser := utilfn.SafeDeref(sshKeywords.SshUser)
+	networkAddr := chosenHost + ":" + chosenPort
+	client, err := connectInternal(connCtx, networkAddr, clientConfig, debugInfo.CurrentClient, proxyCommand, chosenHost, chosenPort, chosenUser)
 	if err != nil {
 		return client, debugInfo.JumpNum, ConnectionError{ConnectionDebugInfo: debugInfo, Err: err}
 	}
@@ -995,7 +1272,7 @@ func findSshConfigKeywords(hostPattern string) (connKeywords *wconfig.ConnKeywor
 	if hostNameProcessed == "" {
 		sshKeywords.SshHostName = &hostPattern
 	} else {
-		sshKeywords.SshHostName = &hostNameRaw
+		sshKeywords.SshHostName = &hostNameProcessed
 	}
 
 	portRaw, err := WaveSshConfigUserSettings().GetStrict(hostPattern, "Port")

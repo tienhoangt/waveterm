@@ -6,6 +6,7 @@ import { adaptFromElectronKeyEvent, checkKeyPressed } from "@/util/keyutil";
 import { CHORD_TIMEOUT } from "@/util/sharedconst";
 import { Rectangle, shell, WebContentsView } from "electron";
 import { createNewWaveWindow, getWaveWindowById } from "emain/emain-window";
+import os from "os";
 import path from "path";
 import { configureAuthKeyRequestInjection } from "./authkey";
 import { setWasActive } from "./emain-activity";
@@ -211,6 +212,15 @@ export class WaveTabView extends WebContentsView {
     }
 
     positionTabOffScreen(winBounds: Rectangle) {
+        const curBounds = this.getBounds();
+        if (
+            curBounds.x == -15000 &&
+            curBounds.y == -15000 &&
+            curBounds.width == winBounds.width &&
+            curBounds.height == winBounds.height
+        ) {
+            return;
+        }
         this.setBounds({
             x: -15000,
             y: -15000,
@@ -234,12 +244,13 @@ export class WaveTabView extends WebContentsView {
     }
 }
 
-let MaxCacheSize = 10;
+const LowMemThresholdBytes = 16 * 1024 * 1024 * 1024;
+let MaxCacheSize = os.totalmem() <= LowMemThresholdBytes ? 3 : 10;
 const wcvCache = new Map<string, WaveTabView>();
 
 export function setMaxTabCacheSize(size: number) {
     console.log("setMaxTabCacheSize", size);
-    MaxCacheSize = size;
+    MaxCacheSize = Math.max(1, size);
 }
 
 export function getWaveTabView(waveTabId: string): WaveTabView | undefined {
@@ -279,16 +290,14 @@ function checkAndEvictCache(): void {
     if (wcvCache.size <= MaxCacheSize) {
         return;
     }
-    const sorted = Array.from(wcvCache.values()).sort((a, b) => {
-        // Prioritize entries which are active
-        if (a.isActiveTab && !b.isActiveTab) {
-            return -1;
+    const inactive = Array.from(wcvCache.values())
+        .filter((tv) => !tv.isActiveTab)
+        .sort((a, b) => a.lastUsedTs - b.lastUsedTs);
+    for (const tv of inactive) {
+        if (wcvCache.size <= MaxCacheSize) {
+            break;
         }
-        // Otherwise, sort by lastUsedTs
-        return a.lastUsedTs - b.lastUsedTs;
-    });
-    for (let i = 0; i < sorted.length - MaxCacheSize; i++) {
-        tryEvictEntry(sorted[i].waveTabId);
+        tryEvictEntry(tv.waveTabId);
     }
 }
 
@@ -309,9 +318,9 @@ export async function getOrCreateWebViewForTab(waveWindowId: string, tabId: stri
     const fullConfig = await RpcApi.GetFullConfigCommand(ElectronWshClient);
     tabView = getSpareTab(fullConfig);
     tabView.waveWindowId = waveWindowId;
+    tabView.waveTabId = tabId;
     tabView.lastUsedTs = Date.now();
     setWaveTabView(tabId, tabView);
-    tabView.waveTabId = tabId;
     tabView.webContents.on("will-navigate", shNavHandler);
     tabView.webContents.on("will-frame-navigate", shFrameNavHandler);
     tabView.webContents.on("did-attach-webview", (event, wc) => {
@@ -324,6 +333,9 @@ export async function getOrCreateWebViewForTab(waveWindowId: string, tabId: stri
         });
     });
     tabView.webContents.on("before-input-event", (e, input) => {
+        if (input.isComposing || input.key === "Process" || input.key === "Dead") {
+            return;
+        }
         const waveEvent = adaptFromElectronKeyEvent(input);
         // console.log("WIN bie", tabView.waveTabId.substring(0, 8), waveEvent.type, waveEvent.code);
         handleCtrlShiftState(tabView.webContents, waveEvent);

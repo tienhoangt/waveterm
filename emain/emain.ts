@@ -378,6 +378,9 @@ async function appMain() {
         console.log("disabling hardware acceleration, per launch settings");
         electronApp.disableHardwareAcceleration();
     }
+    if (unamePlatform === "win32") {
+        electronApp.commandLine.appendSwitch("disk-cache-size", "104857600");
+    }
     const startTs = Date.now();
     const instanceLock = electronApp.requestSingleInstanceLock();
     if (!instanceLock) {

@@ -343,33 +343,76 @@ export function initIpcHandlers() {
     });
 
     const fac = new FastAverageColor();
-    electron.ipcMain.on("update-window-controls-overlay", async (event, rect: Dimensions) => {
-        if (unamePlatform === "darwin") return;
-        try {
-            const fullConfig = await RpcApi.GetFullConfigCommand(ElectronWshClient);
-            if (fullConfig?.settings?.["window:nativetitlebar"] && unamePlatform !== "win32") return;
+    const overlayColorCache = new Map<string, { ts: number; rgba: string; isDark: boolean }>();
+    const OverlayCacheTtlMs = 1500;
+    const MaxOverlayCacheEntries = 64;
+    electron.ipcMain.on(
+        "update-window-controls-overlay",
+        async (event, payload: Dimensions | { color: string; isDark: boolean }) => {
+            if (unamePlatform === "darwin") return;
+            try {
+                const fullConfig = await RpcApi.GetFullConfigCommand(ElectronWshClient);
+                if (fullConfig?.settings?.["window:nativetitlebar"] && unamePlatform !== "win32") return;
 
-            const zoomFactor = event.sender.getZoomFactor();
-            const electronRect: Electron.Rectangle = {
-                x: rect.left * zoomFactor,
-                y: rect.top * zoomFactor,
-                height: rect.height * zoomFactor,
-                width: rect.width * zoomFactor,
-            };
-            const overlay = await event.sender.capturePage(electronRect);
-            const overlayBuffer = overlay.toPNG();
-            const png = PNG.sync.read(overlayBuffer);
-            const color = fac.prepareResult(fac.getColorFromArray4(png.data));
-            const ww = getWaveWindowByWebContentsId(event.sender.id);
-            if (ww == null) return;
-            ww.setTitleBarOverlay({
-                color: unamePlatform === "linux" ? color.rgba : "#00000000",
-                symbolColor: color.isDark ? "white" : "black",
-            });
-        } catch (e) {
-            console.error("Error updating window controls overlay:", e);
+                const ww = getWaveWindowByWebContentsId(event.sender.id);
+                if (ww == null) return;
+
+                if (
+                    payload != null &&
+                    typeof (payload as { color?: unknown }).color === "string" &&
+                    typeof (payload as { isDark?: unknown }).isDark === "boolean"
+                ) {
+                    const colorPayload = payload as { color: string; isDark: boolean };
+                    ww.setTitleBarOverlay({
+                        color: unamePlatform === "linux" ? colorPayload.color : "#00000000",
+                        symbolColor: colorPayload.isDark ? "white" : "black",
+                    });
+                    return;
+                }
+
+                const rect = payload as Dimensions;
+                const zoomFactor = event.sender.getZoomFactor();
+                const electronRect: Electron.Rectangle = {
+                    x: Math.round(rect.left * zoomFactor),
+                    y: Math.round(rect.top * zoomFactor),
+                    height: Math.round(rect.height * zoomFactor),
+                    width: Math.round(rect.width * zoomFactor),
+                };
+                if (electronRect.width <= 0 || electronRect.height <= 0) {
+                    return;
+                }
+                const tabView = getWaveTabViewByWebContentsId(event.sender.id);
+                const cacheKey = `${tabView?.waveTabId ?? event.sender.id}:${electronRect.width}:${electronRect.height}`;
+                const cached = overlayColorCache.get(cacheKey);
+                const now = Date.now();
+                if (cached && now - cached.ts < OverlayCacheTtlMs) {
+                    ww.setTitleBarOverlay({
+                        color: unamePlatform === "linux" ? cached.rgba : "#00000000",
+                        symbolColor: cached.isDark ? "white" : "black",
+                    });
+                    return;
+                }
+
+                const overlay = await event.sender.capturePage(electronRect);
+                const overlayBuffer = overlay.toPNG();
+                const png = PNG.sync.read(overlayBuffer);
+                const color = fac.prepareResult(fac.getColorFromArray4(png.data));
+                if (overlayColorCache.size >= MaxOverlayCacheEntries) {
+                    const oldestKey = overlayColorCache.keys().next().value;
+                    if (oldestKey !== undefined) {
+                        overlayColorCache.delete(oldestKey);
+                    }
+                }
+                overlayColorCache.set(cacheKey, { ts: now, rgba: color.rgba, isDark: color.isDark });
+                ww.setTitleBarOverlay({
+                    color: unamePlatform === "linux" ? color.rgba : "#00000000",
+                    symbolColor: color.isDark ? "white" : "black",
+                });
+            } catch (e) {
+                console.error("Error updating window controls overlay:", e);
+            }
         }
-    });
+    );
 
     electron.ipcMain.on("quicklook", (event, filePath: string) => {
         if (unamePlatform !== "darwin") return;

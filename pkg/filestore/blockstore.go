@@ -36,8 +36,11 @@ const (
 )
 
 const DefaultPartDataSize = 64 * 1024
-const DefaultFlushTime = 5 * time.Second
+const DefaultFlushTime = 15 * time.Second
+const DefaultIdleEvictTime = 60 * time.Second
 const NoPartIdx = -1
+
+var ErrFlushInProgress = fmt.Errorf("flush already in progress")
 
 // for unit tests
 var warningCount = &atomic.Int32{}
@@ -221,6 +224,8 @@ func (s *FileStore) WriteMeta(ctx context.Context, zoneId string, name string, m
 			entry.File.Meta = meta
 		}
 		entry.File.ModTs = time.Now().UnixMilli()
+		entry.DirtyGen++
+		entry.LastAccessTs = time.Now()
 		return nil
 	})
 }
@@ -262,21 +267,26 @@ func (s *FileStore) WriteAt(ctx context.Context, zoneId string, name string, off
 }
 
 func (s *FileStore) AppendData(ctx context.Context, zoneId string, name string, data []byte) error {
-	return withLock(s, zoneId, name, func(entry *CacheEntry) error {
+	_, err := s.AppendDataWithOffset(ctx, zoneId, name, data)
+	return err
+}
+
+func (s *FileStore) AppendDataWithOffset(ctx context.Context, zoneId string, name string, data []byte) (int64, error) {
+	return withLockRtn(s, zoneId, name, func(entry *CacheEntry) (int64, error) {
 		err := entry.loadFileIntoCache(ctx)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		partMap := entry.File.computePartMap(entry.File.Size, int64(len(data)))
 		incompleteParts := incompletePartsFromMap(partMap)
 		if len(incompleteParts) > 0 {
 			err = entry.loadDataPartsIntoCache(ctx, incompleteParts)
 			if err != nil {
-				return err
+				return 0, err
 			}
 		}
 		entry.writeAt(entry.File.Size, data, false)
-		return nil
+		return entry.File.Size, nil
 	})
 }
 
@@ -396,7 +406,7 @@ type FlushStats struct {
 func (s *FileStore) FlushCache(ctx context.Context) (stats FlushStats, rtnErr error) {
 	wasFlushing := s.setUnlessFlushing()
 	if wasFlushing {
-		return stats, fmt.Errorf("flush already in progress")
+		return stats, ErrFlushInProgress
 	}
 	defer s.setIsFlushing(false)
 	startTime := time.Now()
@@ -404,23 +414,95 @@ func (s *FileStore) FlushCache(ctx context.Context) (stats FlushStats, rtnErr er
 		stats.FlushDuration = time.Since(startTime)
 	}()
 
-	// get a copy of dirty keys so we can iterate without the lock
-	dirtyCacheKeys := s.getDirtyCacheKeys()
-	stats.NumDirtyEntries = len(dirtyCacheKeys)
-	for _, key := range dirtyCacheKeys {
-		err := withLock(s, key.ZoneId, key.Name, func(entry *CacheEntry) error {
-			return entry.flushToDB(ctx, false)
+	// Phase 1: Snapshot dirty entries under each entry.Lock and release entry.Lock BEFORE opening the batch WithTx
+	allKeys := s.getAllCacheKeys()
+	var snaps []*cacheSnapshot
+	for _, key := range allKeys {
+		_ = withLock(s, key.ZoneId, key.Name, func(entry *CacheEntry) error {
+			if snap := entry.snapshotDirty(); snap != nil {
+				snaps = append(snaps, snap)
+			}
+			return nil
 		})
+	}
+	stats.NumDirtyEntries = len(snaps)
+
+	// Phase 2: Commit all dirty snapshots in a single SQLite transaction (no entry locks held)
+	if len(snaps) > 0 {
+		deletedKeys, err := dbWriteCacheBatch(ctx, snaps)
 		if ctx.Err() != nil {
-			// transient error (also must stop the loop)
 			return stats, ctx.Err()
 		}
 		if err != nil {
-			return stats, fmt.Errorf("error flushing cache entry[%v]: %v", key, err)
+			flushErrorCount.Add(1)
+			for _, snap := range snaps {
+				_ = withLock(s, snap.Key.ZoneId, snap.Key.Name, func(entry *CacheEntry) error {
+					entry.FlushErrors++
+					if entry.FlushErrors > 3 {
+						entry.clear()
+					}
+					return nil
+				})
+			}
+			return stats, fmt.Errorf("error flushing cache batch (%d entries): %w", len(snaps), err)
 		}
-		stats.NumCommitted++
+
+		// Phase 3: Mark flushed entries clean only where DirtyGen == snap.DirtyGen
+		for _, snap := range snaps {
+			_ = withLock(s, snap.Key.ZoneId, snap.Key.Name, func(entry *CacheEntry) error {
+				if deletedKeys[snap.Key] {
+					if entry.DirtyGen == snap.DirtyGen {
+						entry.clear()
+					}
+					return nil
+				}
+				if entry.DirtyGen == snap.DirtyGen {
+					entry.FlushedGen = snap.DirtyGen
+					entry.DirtyParts = make(map[int]bool)
+					entry.NeedsReplace = false
+				}
+				entry.FlushErrors = 0
+				return nil
+			})
+		}
+		stats.NumCommitted = len(snaps)
 	}
+
+	// Phase 4: Sweep idle clean entries (> DefaultIdleEvictTime)
+	s.sweepIdleCleanEntries(DefaultIdleEvictTime)
 	return stats, nil
+}
+
+// FlushWait waits for any in-flight flush to finish and commits remaining dirty entries.
+func (s *FileStore) FlushWait(ctx context.Context) (FlushStats, error) {
+	for {
+		stats, err := s.FlushCache(ctx)
+		if err != ErrFlushInProgress {
+			return stats, err
+		}
+		ch := s.getFlushDoneCh()
+		if ch == nil {
+			continue
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return stats, ctx.Err()
+		}
+	}
+}
+
+func (s *FileStore) sweepIdleCleanEntries(maxIdle time.Duration) {
+	now := time.Now()
+	allKeys := s.getAllCacheKeys()
+	for _, key := range allKeys {
+		_ = withLock(s, key.ZoneId, key.Name, func(entry *CacheEntry) error {
+			if entry.File != nil && !entry.isDirty() && now.Sub(entry.LastAccessTs) > maxIdle {
+				entry.clear()
+			}
+			return nil
+		})
+	}
 }
 
 ///////////////////////////////////
@@ -474,22 +556,30 @@ func (file *WaveFile) computePartMap(startOffset int64, size int64) map[int]int 
 	return partMap
 }
 
-func (s *FileStore) getDirtyCacheKeys() []cacheKey {
+func (s *FileStore) getAllCacheKeys() []cacheKey {
 	s.Lock.Lock()
 	defer s.Lock.Unlock()
-	var dirtyCacheKeys []cacheKey
-	for key, entry := range s.Cache {
-		if entry.File != nil {
-			dirtyCacheKeys = append(dirtyCacheKeys, key)
-		}
+	keys := make([]cacheKey, 0, len(s.Cache))
+	for key := range s.Cache {
+		keys = append(keys, key)
 	}
-	return dirtyCacheKeys
+	return keys
+}
+
+func (s *FileStore) getFlushDoneCh() chan struct{} {
+	s.Lock.Lock()
+	defer s.Lock.Unlock()
+	return s.flushDoneCh
 }
 
 func (s *FileStore) setIsFlushing(flushing bool) {
 	s.Lock.Lock()
 	defer s.Lock.Unlock()
 	s.IsFlushing = flushing
+	if !flushing && s.flushDoneCh != nil {
+		close(s.flushDoneCh)
+		s.flushDoneCh = nil
+	}
 }
 
 // returns old value of IsFlushing
@@ -500,6 +590,7 @@ func (s *FileStore) setUnlessFlushing() bool {
 		return true
 	}
 	s.IsFlushing = true
+	s.flushDoneCh = make(chan struct{})
 	return false
 }
 
@@ -515,8 +606,8 @@ func (s *FileStore) runFlusher() {
 	}()
 	for {
 		stats, err := s.runFlushWithNewContext()
-		if err != nil || stats.NumDirtyEntries > 0 {
-			log.Printf("filestore flush: %d/%d entries flushed, err:%v\n", stats.NumCommitted, stats.NumDirtyEntries, err)
+		if err != nil {
+			log.Printf("filestore flush error: %d/%d entries flushed, err:%v\n", stats.NumCommitted, stats.NumDirtyEntries, err)
 		}
 		if stopFlush.Load() {
 			log.Printf("filestore flusher stopping\n")

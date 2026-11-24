@@ -259,11 +259,18 @@ function updateWaveObject(update: WaveObjUpdate) {
         return;
     }
     const oref = makeORef(update.otype, update.oid);
-    const wov = getWaveObjectValue(oref);
     if (update.updatetype == "delete") {
         console.log("WaveObj deleted", oref);
-        globalStore.set(wov.dataAtom, { value: null, loading: false });
+        const wov = getWaveObjectValue(oref, false);
+        if (wov != null) {
+            globalStore.set(wov.dataAtom, { value: null, loading: false });
+        }
+        waveObjectValueCache.delete(oref);
+        waveObjectDerivedAtomCache.delete(oref + ":value");
+        waveObjectDerivedAtomCache.delete(oref + ":loading");
+        waveObjectDerivedAtomCache.delete(oref + ":isnull");
     } else {
+        const wov = getWaveObjectValue(oref);
         if (!isValidWaveObj(update.obj)) {
             console.log("invalid wave object update", update);
             return;

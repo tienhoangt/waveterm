@@ -33,7 +33,8 @@ function applyTransparencyToColor(hexColor: string, transparency: number): strin
 export function computeTheme(
     fullConfig: FullConfigType,
     themeName: string,
-    termTransparency: number
+    termTransparency: number,
+    allowTransparency: boolean = true
 ): [TermThemeType, string] {
     let theme: TermThemeType = fullConfig?.termthemes?.[themeName];
     if (theme == null) {
@@ -49,7 +50,7 @@ export function computeTheme(
         }
     }
     const bgcolor = themeCopy.background;
-    themeCopy.background = "#00000000";
+    themeCopy.background = allowTransparency ? "#00000000" : bgcolor || "#000000";
     return [themeCopy, bgcolor];
 }
 

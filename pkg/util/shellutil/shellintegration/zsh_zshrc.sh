@@ -23,6 +23,14 @@ if [[ "$HISTFILE" == "$WAVETERM_ZDOTDIR/.zsh_history" ]]; then
   HISTFILE="$HOME/.zsh_history"
 fi
 
+# enable Option+Left / Option+Right word navigation if not already bound by user config
+if [[ "$(bindkey '^[[1;3D' 2>/dev/null)" == *"undefined-key"* || -z "$(bindkey '^[[1;3D' 2>/dev/null)" ]]; then
+  bindkey '^[[1;3D' backward-word
+fi
+if [[ "$(bindkey '^[[1;3C' 2>/dev/null)" == *"undefined-key"* || -z "$(bindkey '^[[1;3C' 2>/dev/null)" ]]; then
+  bindkey '^[[1;3C' forward-word
+fi
+
 typeset -g _WAVETERM_SI_FIRSTPRECMD=1
 
 # shell integration

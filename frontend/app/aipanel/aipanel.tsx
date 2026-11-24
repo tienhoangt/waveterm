@@ -356,13 +356,20 @@ const AIPanelComponentInner = memo(({ roundTopLeft }: AIPanelComponentInnerProps
         model.ensureRateLimitSet();
     }, [model]);
 
-    const handleSubmit = async (e: React.FormEvent) => {
-        e.preventDefault();
-        await model.handleSubmit();
-        setTimeout(() => {
-            model.focusInput();
-        }, 100);
-    };
+    const handleSubmit = useCallback(
+        async (e: React.FormEvent) => {
+            e.preventDefault();
+            await model.handleSubmit();
+            setTimeout(() => {
+                model.focusInput();
+            }, 100);
+        },
+        [model]
+    );
+
+    const handleMessagesContextMenu = useCallback((e: React.MouseEvent) => {
+        handleWaveAIContextMenu(e, true);
+    }, []);
 
     const hasFilesDragged = (dataTransfer: DataTransfer): boolean => {
         // Check if the drag operation contains files by looking at the types
@@ -551,6 +558,8 @@ const AIPanelComponentInner = memo(({ roundTopLeft }: AIPanelComponentInnerProps
 
     const showBlockMask = isLayoutMode && showOverlayBlockNums;
     const borderColor = isFocused ? (tabActiveBorderColor ?? null) : (tabBorderColor ?? null);
+    const isAIStreaming = status === "streaming" || status === "submitted";
+    const shouldRenderMessages = isPanelVisible || isAIStreaming;
 
     return (
         <div
@@ -590,10 +599,12 @@ const AIPanelComponentInner = memo(({ roundTopLeft }: AIPanelComponentInnerProps
                     <TelemetryRequiredMessage />
                 ) : (
                     <>
-                        {messages.length === 0 && initialLoadDone ? (
+                        {!shouldRenderMessages ? (
+                            <div className="flex-1" />
+                        ) : messages.length === 0 && initialLoadDone ? (
                             <div
                                 className="flex-1 overflow-y-auto p-2 relative"
-                                onContextMenu={(e) => handleWaveAIContextMenu(e, true)}
+                                onContextMenu={handleMessagesContextMenu}
                             >
                                 <div className="absolute top-2 left-2 z-10">
                                     <AIModeDropdown />
@@ -604,7 +615,7 @@ const AIPanelComponentInner = memo(({ roundTopLeft }: AIPanelComponentInnerProps
                             <AIPanelMessages
                                 messages={messages}
                                 status={status}
-                                onContextMenu={(e) => handleWaveAIContextMenu(e, true)}
+                                onContextMenu={handleMessagesContextMenu}
                             />
                         )}
                         <AIErrorMessage />

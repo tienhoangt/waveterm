@@ -50,19 +50,20 @@ type ChatImageUrl struct {
 }
 
 type ChatRequestMessage struct {
-	Role             string            `json:"role"`                   // "system","user","assistant","tool"
-	ReasoningContent string            `json:"-"`                      // DeepSeek/OpenAI reasoning_content (top-level string)
-	Content          string            `json:"-"`                      // plain text (used when ContentParts is nil)
-	ContentParts     []ChatContentPart `json:"-"`                      // multimodal parts (used when images present)
-	ToolCalls        []ToolCall        `json:"tool_calls,omitempty"`   // assistant tool-call message
-	ToolCallID       string            `json:"tool_call_id,omitempty"` // for role:"tool"
-	Name             string            `json:"name,omitempty"`         // tool name on role:"tool"
+	Role                string            `json:"role"`                   // "system","user","assistant","tool"
+	ReasoningContent    string            `json:"-"`                      // DeepSeek/OpenAI reasoning_content (top-level string)
+	HasReasoningContent bool              `json:"-"`                      // true when reasoning_content must be serialized even if empty (e.g. DeepSeek thinking mode)
+	Content             string            `json:"-"`                      // plain text (used when ContentParts is nil)
+	ContentParts        []ChatContentPart `json:"-"`                      // multimodal parts (used when images present)
+	ToolCalls           []ToolCall        `json:"tool_calls,omitempty"`   // assistant tool-call message
+	ToolCallID          string            `json:"tool_call_id,omitempty"` // for role:"tool"
+	Name                string            `json:"name,omitempty"`         // tool name on role:"tool"
 }
 
 // chatRequestMessageJSON is the wire format for ChatRequestMessage
 type chatRequestMessageJSON struct {
 	Role             string          `json:"role"`
-	ReasoningContent string          `json:"reasoning_content,omitempty"`
+	ReasoningContent *string         `json:"reasoning_content,omitempty"`
 	Content          json.RawMessage `json:"content"`
 	ToolCalls        []ToolCall      `json:"tool_calls,omitempty"`
 	ToolCallID       string          `json:"tool_call_id,omitempty"`
@@ -71,11 +72,14 @@ type chatRequestMessageJSON struct {
 
 func (cm ChatRequestMessage) MarshalJSON() ([]byte, error) {
 	raw := chatRequestMessageJSON{
-		Role:             cm.Role,
-		ReasoningContent: cm.ReasoningContent,
-		ToolCalls:        cm.ToolCalls,
-		ToolCallID:       cm.ToolCallID,
-		Name:             cm.Name,
+		Role:       cm.Role,
+		ToolCalls:  cm.ToolCalls,
+		ToolCallID: cm.ToolCallID,
+		Name:       cm.Name,
+	}
+	if cm.ReasoningContent != "" || cm.HasReasoningContent {
+		rc := cm.ReasoningContent
+		raw.ReasoningContent = &rc
 	}
 	if len(cm.ContentParts) > 0 {
 		b, err := json.Marshal(cm.ContentParts)
@@ -99,7 +103,13 @@ func (cm *ChatRequestMessage) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	cm.Role = raw.Role
-	cm.ReasoningContent = raw.ReasoningContent
+	if raw.ReasoningContent != nil {
+		cm.ReasoningContent = *raw.ReasoningContent
+		cm.HasReasoningContent = true
+	} else {
+		cm.ReasoningContent = ""
+		cm.HasReasoningContent = false
+	}
 	cm.ToolCalls = raw.ToolCalls
 	cm.ToolCallID = raw.ToolCallID
 	cm.Name = raw.Name

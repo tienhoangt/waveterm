@@ -2000,6 +2000,7 @@ declare global {
         filename: string;
         fileop: string;
         data64: string;
+        fileoffset?: number;
     };
 
     // webcmd.WSRpcCommand
@@ -2058,6 +2059,8 @@ declare global {
         meta?: boolean;
         cmd?: boolean;
         option?: boolean;
+        isComposing?: boolean;
+        keyCode?: number;
     };
 
     // wshrpc.WaveNotificationOptions
@@ -2101,6 +2104,8 @@ declare global {
         meta?: boolean;
         cmd?: boolean;
         option?: boolean;
+        isComposing?: boolean;
+        keyCode?: number;
     };
 
     // waveobj.Window

@@ -5,12 +5,24 @@ import { CopyButton } from "@/app/element/copybutton";
 import { IconButton } from "@/app/element/iconbutton";
 import { cn, useAtomValueSafe } from "@/util/util";
 import type { Atom } from "jotai";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { bundledLanguages, codeToHtml } from "shiki/bundle/web";
 import { Streamdown } from "streamdown";
 import { throttle } from "throttle-debounce";
 
-const ShikiTheme = "github-dark-high-contrast";
+const ShikiTheme = "github-dark-high-contrast" as const;
+const StreamdownShikiTheme: [typeof ShikiTheme, typeof ShikiTheme] = [ShikiTheme, ShikiTheme];
+const StreamdownControls = {
+    code: false,
+    table: false,
+    mermaid: true,
+};
+const StreamdownMermaid = {
+    config: {
+        theme: "dark" as const,
+        darkMode: true,
+    },
+};
 
 function extractText(node: React.ReactNode): string {
     if (node == null || typeof node === "boolean") return "";
@@ -62,6 +74,12 @@ function CodeHighlight({ className = "", lang, text }: { className?: string; lan
     );
 
     const throttledHighlight = useMemo(() => throttle(300, highlightCode, { noLeading: false }), [highlightCode]);
+
+    useEffect(() => {
+        return () => {
+            throttledHighlight.cancel();
+        };
+    }, [throttledHighlight]);
 
     useEffect(() => {
         const disposedRef = { current: false };
@@ -205,124 +223,113 @@ interface WaveStreamdownProps {
     codeBlockMaxWidthAtom?: Atom<number>;
 }
 
-export const WaveStreamdown = ({
-    text,
-    parseIncompleteMarkdown,
-    className,
-    onClickExecute,
-    codeBlockMaxWidthAtom,
-}: WaveStreamdownProps) => {
-    const components = useMemo(
-        () => ({
-            code: Code,
-            pre: (props: React.HTMLAttributes<HTMLPreElement>) => (
-                <CodeBlock
-                    children={props.children}
-                    onClickExecute={onClickExecute}
-                    codeBlockMaxWidthAtom={codeBlockMaxWidthAtom}
-                />
-            ),
-            p: (props: React.HTMLAttributes<HTMLParagraphElement>) => <p {...props} className="text-secondary" />,
-            h1: (props: React.HTMLAttributes<HTMLHeadingElement>) => (
-                <h1 {...props} className="text-2xl font-bold text-primary mt-6 mb-3" />
-            ),
-            h2: (props: React.HTMLAttributes<HTMLHeadingElement>) => (
-                <h2 {...props} className="text-xl font-bold text-primary mt-5 mb-2" />
-            ),
-            h3: (props: React.HTMLAttributes<HTMLHeadingElement>) => (
-                <h3 {...props} className="text-lg font-bold text-primary mt-4 mb-2" />
-            ),
-            h4: (props: React.HTMLAttributes<HTMLHeadingElement>) => (
-                <h4 {...props} className="text-base font-semibold text-primary mt-3 mb-1" />
-            ),
-            h5: (props: React.HTMLAttributes<HTMLHeadingElement>) => (
-                <h5 {...props} className="text-sm font-semibold text-primary mt-2 mb-1" />
-            ),
-            h6: (props: React.HTMLAttributes<HTMLHeadingElement>) => (
-                <h6 {...props} className="text-sm text-primary mt-2 mb-1" />
-            ),
-            table: (props: React.HTMLAttributes<HTMLTableElement>) => (
-                <table {...props} className="w-full border-collapse my-4" />
-            ),
-            thead: (props: React.HTMLAttributes<HTMLTableSectionElement>) => (
-                <thead {...props} className="border-b border-border" />
-            ),
-            tbody: (props: React.HTMLAttributes<HTMLTableSectionElement>) => <tbody {...props} />,
-            tr: (props: React.HTMLAttributes<HTMLTableRowElement>) => (
-                <tr {...props} className="border-b border-border/50 last:border-0" />
-            ),
-            th: (props: React.HTMLAttributes<HTMLTableCellElement>) => (
-                <th {...props} className="text-left font-semibold px-2 py-1.5 text-sm text-primary" />
-            ),
-            td: (props: React.HTMLAttributes<HTMLTableCellElement>) => (
-                <td {...props} className="px-2 py-1.5 text-sm text-secondary" />
-            ),
-            ul: (props: React.HTMLAttributes<HTMLUListElement>) => (
-                <ul
-                    {...props}
-                    className="list-disc list-outside pl-6 mt-1 mb-2 text-secondary [&_ul]:my-1 [&_ol]:my-1"
-                />
-            ),
-            ol: (props: React.HTMLAttributes<HTMLOListElement>) => (
-                <ol
-                    {...props}
-                    className="list-decimal list-outside pl-6 mt-1 mb-2 text-secondary [&_ul]:my-1 [&_ol]:my-1"
-                />
-            ),
-            li: (props: React.HTMLAttributes<HTMLLIElement>) => (
-                <li {...props} className="text-secondary leading-snug" />
-            ),
-            blockquote: (props: React.HTMLAttributes<HTMLQuoteElement>) => (
-                <blockquote {...props} className="border-l-2 border-border pl-4 my-2 text-secondary italic" />
-            ),
-            details: ({ children, ...props }) => {
-                const childArray = Array.isArray(children) ? children : [children];
+export const WaveStreamdown = memo(
+    ({ text, parseIncompleteMarkdown, className, onClickExecute, codeBlockMaxWidthAtom }: WaveStreamdownProps) => {
+        const components = useMemo(
+            () => ({
+                code: Code,
+                pre: (props: React.HTMLAttributes<HTMLPreElement>) => (
+                    <CodeBlock
+                        children={props.children}
+                        onClickExecute={onClickExecute}
+                        codeBlockMaxWidthAtom={codeBlockMaxWidthAtom}
+                    />
+                ),
+                p: (props: React.HTMLAttributes<HTMLParagraphElement>) => <p {...props} className="text-secondary" />,
+                h1: (props: React.HTMLAttributes<HTMLHeadingElement>) => (
+                    <h1 {...props} className="text-2xl font-bold text-primary mt-6 mb-3" />
+                ),
+                h2: (props: React.HTMLAttributes<HTMLHeadingElement>) => (
+                    <h2 {...props} className="text-xl font-bold text-primary mt-5 mb-2" />
+                ),
+                h3: (props: React.HTMLAttributes<HTMLHeadingElement>) => (
+                    <h3 {...props} className="text-lg font-bold text-primary mt-4 mb-2" />
+                ),
+                h4: (props: React.HTMLAttributes<HTMLHeadingElement>) => (
+                    <h4 {...props} className="text-base font-semibold text-primary mt-3 mb-1" />
+                ),
+                h5: (props: React.HTMLAttributes<HTMLHeadingElement>) => (
+                    <h5 {...props} className="text-sm font-semibold text-primary mt-2 mb-1" />
+                ),
+                h6: (props: React.HTMLAttributes<HTMLHeadingElement>) => (
+                    <h6 {...props} className="text-sm text-primary mt-2 mb-1" />
+                ),
+                table: (props: React.HTMLAttributes<HTMLTableElement>) => (
+                    <table {...props} className="w-full border-collapse my-4" />
+                ),
+                thead: (props: React.HTMLAttributes<HTMLTableSectionElement>) => (
+                    <thead {...props} className="border-b border-border" />
+                ),
+                tbody: (props: React.HTMLAttributes<HTMLTableSectionElement>) => <tbody {...props} />,
+                tr: (props: React.HTMLAttributes<HTMLTableRowElement>) => (
+                    <tr {...props} className="border-b border-border/50 last:border-0" />
+                ),
+                th: (props: React.HTMLAttributes<HTMLTableCellElement>) => (
+                    <th {...props} className="text-left font-semibold px-2 py-1.5 text-sm text-primary" />
+                ),
+                td: (props: React.HTMLAttributes<HTMLTableCellElement>) => (
+                    <td {...props} className="px-2 py-1.5 text-sm text-secondary" />
+                ),
+                ul: (props: React.HTMLAttributes<HTMLUListElement>) => (
+                    <ul
+                        {...props}
+                        className="list-disc list-outside pl-6 mt-1 mb-2 text-secondary [&_ul]:my-1 [&_ol]:my-1"
+                    />
+                ),
+                ol: (props: React.HTMLAttributes<HTMLOListElement>) => (
+                    <ol
+                        {...props}
+                        className="list-decimal list-outside pl-6 mt-1 mb-2 text-secondary [&_ul]:my-1 [&_ol]:my-1"
+                    />
+                ),
+                li: (props: React.HTMLAttributes<HTMLLIElement>) => (
+                    <li {...props} className="text-secondary leading-snug" />
+                ),
+                blockquote: (props: React.HTMLAttributes<HTMLQuoteElement>) => (
+                    <blockquote {...props} className="border-l-2 border-border pl-4 my-2 text-secondary italic" />
+                ),
+                details: ({ children, ...props }) => {
+                    const childArray = Array.isArray(children) ? children : [children];
 
-                // Extract summary text and content
-                const summary = childArray.find((c) => c?.props?.node?.tagName === "summary");
-                const summaryText = summary?.props?.children || "Details";
-                const content = childArray.filter((c) => c?.props?.node?.tagName !== "summary");
+                    // Extract summary text and content
+                    const summary = childArray.find((c) => c?.props?.node?.tagName === "summary");
+                    const summaryText = summary?.props?.children || "Details";
+                    const content = childArray.filter((c) => c?.props?.node?.tagName !== "summary");
 
-                return (
-                    <Collapsible title={summaryText} defaultOpen={props.open}>
-                        {content}
-                    </Collapsible>
-                );
-            },
-            summary: () => null, // Don't render summary separately
-            a: (props: React.AnchorHTMLAttributes<HTMLAnchorElement>) => (
-                <a {...props} className="text-accent hover:underline" />
-            ),
-            strong: (props: React.HTMLAttributes<HTMLElement>) => (
-                <strong {...props} className="font-semibold text-secondary" />
-            ),
-            em: (props: React.HTMLAttributes<HTMLElement>) => <em {...props} className="italic text-secondary" />,
-        }),
-        [onClickExecute, codeBlockMaxWidthAtom]
-    );
-
-    return (
-        <Streamdown
-            parseIncompleteMarkdown={parseIncompleteMarkdown}
-            className={cn(
-                "wave-streamdown text-secondary [&>*:first-child]:mt-0 [&>*:first-child>*:first-child]:mt-0 space-y-2",
-                className
-            )}
-            shikiTheme={[ShikiTheme, ShikiTheme]}
-            controls={{
-                code: false,
-                table: false,
-                mermaid: true,
-            }}
-            mermaid={{
-                config: {
-                    theme: "dark",
-                    darkMode: true,
+                    return (
+                        <Collapsible title={summaryText} defaultOpen={props.open}>
+                            {content}
+                        </Collapsible>
+                    );
                 },
-            }}
-            components={components}
-        >
-            {text}
-        </Streamdown>
-    );
-};
+                summary: () => null, // Don't render summary separately
+                a: (props: React.AnchorHTMLAttributes<HTMLAnchorElement>) => (
+                    <a {...props} className="text-accent hover:underline" />
+                ),
+                strong: (props: React.HTMLAttributes<HTMLElement>) => (
+                    <strong {...props} className="font-semibold text-secondary" />
+                ),
+                em: (props: React.HTMLAttributes<HTMLElement>) => <em {...props} className="italic text-secondary" />,
+            }),
+            [onClickExecute, codeBlockMaxWidthAtom]
+        );
+
+        return (
+            <Streamdown
+                parseIncompleteMarkdown={parseIncompleteMarkdown}
+                className={cn(
+                    "wave-streamdown text-secondary [&>*:first-child]:mt-0 [&>*:first-child>*:first-child]:mt-0 space-y-2",
+                    className
+                )}
+                shikiTheme={StreamdownShikiTheme}
+                controls={StreamdownControls}
+                mermaid={StreamdownMermaid}
+                components={components}
+            >
+                {text}
+            </Streamdown>
+        );
+    }
+);
+
+WaveStreamdown.displayName = "WaveStreamdown";

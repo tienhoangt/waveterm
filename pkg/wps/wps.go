@@ -248,6 +248,13 @@ func (b *BrokerType) SendUpdateEvents(updates waveobj.UpdatesRtnType) {
 	}
 }
 
+func (b *BrokerType) HasSubscribers(eventType string) bool {
+	b.Lock.Lock()
+	defer b.Lock.Unlock()
+	bs := b.SubMap[eventType]
+	return bs != nil && !bs.IsEmpty()
+}
+
 func (b *BrokerType) getMatchingRouteIds(event WaveEvent) []string {
 	b.Lock.Lock()
 	defer b.Lock.Unlock()

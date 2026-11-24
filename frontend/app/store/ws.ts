@@ -47,6 +47,7 @@ class WSControl {
     eoOpts: ElectronOverrideOpts;
     noReconnect: boolean = false;
     onOpenTimeoutId: NodeJS.Timeout = null;
+    pingIntervalId: ReturnType<typeof setInterval> = null;
 
     constructor(
         baseHostPort: string,
@@ -59,12 +60,20 @@ class WSControl {
         this.stableId = stableId;
         this.open = false;
         this.eoOpts = electronOverrideOpts;
-        setInterval(this.sendPing.bind(this), 5000);
+        this.pingIntervalId = setInterval(this.sendPing.bind(this), 5000);
     }
 
     shutdown() {
         this.noReconnect = true;
-        this.wsConn.close();
+        if (this.pingIntervalId != null) {
+            clearInterval(this.pingIntervalId);
+            this.pingIntervalId = null;
+        }
+        if (this.onOpenTimeoutId != null) {
+            clearTimeout(this.onOpenTimeoutId);
+            this.onOpenTimeoutId = null;
+        }
+        this.wsConn?.close();
     }
 
     connectNow(desc: string) {
@@ -208,7 +217,7 @@ class WSControl {
             return;
         }
         const msg = JSON.stringify(data);
-        const byteSize = new Blob([msg]).size;
+        const byteSize = msg.length;
         if (byteSize > MaxWebSocketSendSize) {
             console.log("ws message too large", byteSize, data.wscommand, msg.substring(0, 100));
             return;

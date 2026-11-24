@@ -18,9 +18,10 @@ type cacheKey struct {
 }
 
 type FileStore struct {
-	Lock       *sync.Mutex
-	Cache      map[cacheKey]*CacheEntry
-	IsFlushing bool
+	Lock        *sync.Mutex
+	Cache       map[cacheKey]*CacheEntry
+	IsFlushing  bool
+	flushDoneCh chan struct{}
 }
 
 type DataCacheEntry struct {
@@ -28,16 +29,28 @@ type DataCacheEntry struct {
 	Data    []byte // capacity is always ZoneDataPartSize
 }
 
-// if File or DataEntries are not nil then they are dirty (need to be flushed to disk)
+type cacheSnapshot struct {
+	Key          cacheKey
+	File         *WaveFile
+	DataEntries  map[int]*DataCacheEntry
+	NeedsReplace bool
+	DirtyGen     uint64
+}
+
 type CacheEntry struct {
 	PinCount int // this is synchronzed with the FileStore lock (not the entry lock)
 
-	Lock        *sync.Mutex
-	ZoneId      string
-	Name        string
-	File        *WaveFile
-	DataEntries map[int]*DataCacheEntry
-	FlushErrors int
+	Lock         *sync.Mutex
+	ZoneId       string
+	Name         string
+	File         *WaveFile
+	DataEntries  map[int]*DataCacheEntry
+	DirtyParts   map[int]bool
+	DirtyGen     uint64
+	FlushedGen   uint64
+	NeedsReplace bool
+	LastAccessTs time.Time
+	FlushErrors  int
 }
 
 //lint:ignore U1000 used for testing
@@ -84,10 +97,44 @@ func (s *FileStore) unpinEntryAndTryDelete(zoneId string, name string) {
 	}
 }
 
+func (entry *CacheEntry) isDirty() bool {
+	return entry.File != nil && entry.DirtyGen > entry.FlushedGen
+}
+
 func (entry *CacheEntry) clear() {
 	entry.File = nil
 	entry.DataEntries = make(map[int]*DataCacheEntry)
+	entry.DirtyParts = make(map[int]bool)
+	entry.DirtyGen = 0
+	entry.FlushedGen = 0
+	entry.NeedsReplace = false
 	entry.FlushErrors = 0
+}
+
+func (entry *CacheEntry) snapshotDirty() *cacheSnapshot {
+	if !entry.isDirty() {
+		return nil
+	}
+	clonedParts := make(map[int]*DataCacheEntry, len(entry.DirtyParts))
+	for partIdx := range entry.DirtyParts {
+		dce := entry.DataEntries[partIdx]
+		if dce == nil {
+			continue
+		}
+		dataCopy := make([]byte, len(dce.Data))
+		copy(dataCopy, dce.Data)
+		clonedParts[partIdx] = &DataCacheEntry{
+			PartIdx: dce.PartIdx,
+			Data:    dataCopy,
+		}
+	}
+	return &cacheSnapshot{
+		Key:          cacheKey{ZoneId: entry.ZoneId, Name: entry.Name},
+		File:         entry.File.DeepCopy(),
+		DataEntries:  clonedParts,
+		NeedsReplace: entry.NeedsReplace,
+		DirtyGen:     entry.DirtyGen,
+	}
 }
 
 func (entry *CacheEntry) getOrCreateDataCacheEntry(partIdx int) *DataCacheEntry {
@@ -182,6 +229,8 @@ func (entry *CacheEntry) writeAt(offset int64, data []byte, replace bool) {
 	endWriteOffset := offset + int64(len(data))
 	if replace {
 		entry.DataEntries = make(map[int]*DataCacheEntry)
+		entry.DirtyParts = make(map[int]bool)
+		entry.NeedsReplace = true
 	}
 	for len(data) > 0 {
 		partIdx := int(offset / partDataSize)
@@ -193,6 +242,7 @@ func (entry *CacheEntry) writeAt(offset int64, data []byte, replace bool) {
 		partData := entry.getOrCreateDataCacheEntry(partIdx)
 		nw, newDce := partData.writeToPart(partOffset, data)
 		entry.DataEntries[partIdx] = newDce
+		entry.DirtyParts[partIdx] = true
 		data = data[nw:]
 		offset += nw
 	}
@@ -200,10 +250,13 @@ func (entry *CacheEntry) writeAt(offset int64, data []byte, replace bool) {
 		entry.File.Size = endWriteOffset
 	}
 	entry.File.ModTs = time.Now().UnixMilli()
+	entry.DirtyGen++
+	entry.LastAccessTs = time.Now()
 }
 
 // returns (realOffset, data, error)
 func (entry *CacheEntry) readAt(ctx context.Context, offset int64, size int64, readFull bool) (int64, []byte, error) {
+	entry.LastAccessTs = time.Now()
 	if offset < 0 {
 		return 0, nil, fmt.Errorf("offset cannot be negative")
 	}
@@ -316,13 +369,15 @@ func (entry *CacheEntry) loadDataPartsForRead(ctx context.Context, parts []int) 
 
 func makeCacheEntry(zoneId string, name string) *CacheEntry {
 	return &CacheEntry{
-		Lock:        &sync.Mutex{},
-		ZoneId:      zoneId,
-		Name:        name,
-		PinCount:    0,
-		File:        nil,
-		DataEntries: make(map[int]*DataCacheEntry),
-		FlushErrors: 0,
+		Lock:         &sync.Mutex{},
+		ZoneId:       zoneId,
+		Name:         name,
+		PinCount:     0,
+		File:         nil,
+		DataEntries:  make(map[int]*DataCacheEntry),
+		DirtyParts:   make(map[int]bool),
+		LastAccessTs: time.Now(),
+		FlushErrors:  0,
 	}
 }
 

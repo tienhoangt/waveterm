@@ -7,7 +7,7 @@ import { type WaveAIModel } from "@/app/aipanel/waveai-model";
 import { Tooltip } from "@/element/tooltip";
 import { cn } from "@/util/util";
 import { useAtom, useAtomValue } from "jotai";
-import { memo, useCallback, useEffect, useRef } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 
 interface AIPanelInputProps {
     onSubmit: (e: React.FormEvent) => void;
@@ -23,11 +23,21 @@ export interface AIPanelInputRef {
 
 export const AIPanelInput = memo(({ onSubmit, status, model }: AIPanelInputProps) => {
     const [input, setInput] = useAtom(model.inputAtom);
+    const [draftValue, setDraftValue] = useState(input);
+    const isComposingRef = useRef(false);
+    const resizeRafRef = useRef<number | null>(null);
+    const lastHeightRef = useRef<number>(0);
     const isFocused = useAtomValue(model.isWaveAIFocusedAtom);
     const isChatEmpty = useAtomValue(model.isChatEmptyAtom);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const isPanelOpen = useAtomValue(model.getPanelVisibleAtom());
+
+    useEffect(() => {
+        if (!isComposingRef.current) {
+            setDraftValue(input);
+        }
+    }, [input]);
 
     let placeholder: string;
     if (!isChatEmpty) {
@@ -38,14 +48,35 @@ export const AIPanelInput = memo(({ onSubmit, status, model }: AIPanelInputProps
         placeholder = "Ask Wave AI anything...";
     }
 
-    const resizeTextarea = useCallback(() => {
+    const resizeTextareaNow = useCallback(() => {
         const textarea = textareaRef.current;
         if (!textarea) return;
 
         textarea.style.height = "auto";
         const scrollHeight = textarea.scrollHeight;
         const maxHeight = 7 * 24;
-        textarea.style.height = `${Math.min(scrollHeight, maxHeight)}px`;
+        const nextHeight = Math.min(scrollHeight, maxHeight);
+        lastHeightRef.current = nextHeight;
+        textarea.style.height = `${nextHeight}px`;
+    }, []);
+
+    const resizeTextarea = useCallback(() => {
+        if (resizeRafRef.current != null) {
+            cancelAnimationFrame(resizeRafRef.current);
+        }
+        resizeRafRef.current = requestAnimationFrame(() => {
+            resizeRafRef.current = null;
+            resizeTextareaNow();
+        });
+    }, [resizeTextareaNow]);
+
+    useEffect(() => {
+        return () => {
+            if (resizeRafRef.current != null) {
+                cancelAnimationFrame(resizeRafRef.current);
+                resizeRafRef.current = null;
+            }
+        };
     }, []);
 
     useEffect(() => {
@@ -67,11 +98,33 @@ export const AIPanelInput = memo(({ onSubmit, status, model }: AIPanelInputProps
     }, [model, resizeTextarea]);
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-        const isComposing = e.nativeEvent?.isComposing || e.keyCode == 229;
+        const isComposing = isComposingRef.current || e.nativeEvent?.isComposing || e.keyCode == 229;
         if (e.key === "Enter" && !e.shiftKey && !isComposing) {
             e.preventDefault();
+            if (draftValue !== input) {
+                setInput(draftValue);
+            }
             onSubmit(e as any);
         }
+    };
+
+    const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+        const nextVal = e.target.value;
+        setDraftValue(nextVal);
+        if (!isComposingRef.current) {
+            setInput(nextVal);
+        }
+    };
+
+    const handleCompositionStart = () => {
+        isComposingRef.current = true;
+    };
+
+    const handleCompositionEnd = (e: React.CompositionEvent<HTMLTextAreaElement>) => {
+        isComposingRef.current = false;
+        const committedVal = e.currentTarget.value;
+        setDraftValue(committedVal);
+        setInput(committedVal);
     };
 
     const handleFocus = useCallback(() => {
@@ -95,7 +148,7 @@ export const AIPanelInput = memo(({ onSubmit, status, model }: AIPanelInputProps
 
     useEffect(() => {
         resizeTextarea();
-    }, [input, resizeTextarea]);
+    }, [draftValue, resizeTextarea]);
 
     useEffect(() => {
         if (isPanelOpen) {
@@ -146,8 +199,10 @@ export const AIPanelInput = memo(({ onSubmit, status, model }: AIPanelInputProps
                 <div className="relative">
                     <textarea
                         ref={textareaRef}
-                        value={input}
-                        onChange={(e) => setInput(e.target.value)}
+                        value={draftValue}
+                        onChange={handleChange}
+                        onCompositionStart={handleCompositionStart}
+                        onCompositionEnd={handleCompositionEnd}
                         onKeyDown={handleKeyDown}
                         onFocus={handleFocus}
                         onBlur={handleBlur}
@@ -155,7 +210,7 @@ export const AIPanelInput = memo(({ onSubmit, status, model }: AIPanelInputProps
                         className={cn(
                             "w-full  text-white px-2 py-2 pr-5 focus:outline-none resize-none overflow-auto bg-zinc-800/50"
                         )}
-                        style={{ fontSize: "13px" }}
+                        style={{ fontSize: "13px", fontFamily: "var(--markdown-font-family)" }}
                         rows={2}
                     />
                     <Tooltip content="Attach files" placement="top" divClassName="absolute bottom-6.5 right-1">
@@ -186,10 +241,10 @@ export const AIPanelInput = memo(({ onSubmit, status, model }: AIPanelInputProps
                         <Tooltip content="Send message (Enter)" placement="top" divClassName="absolute bottom-1.5 right-1">
                             <button
                                 type="submit"
-                                disabled={status !== "ready" || !input.trim()}
+                                disabled={status !== "ready" || !draftValue.trim()}
                                 className={cn(
                                     "w-5 h-5 transition-colors flex items-center justify-center",
-                                    status !== "ready" || !input.trim()
+                                    status !== "ready" || !draftValue.trim()
                                         ? "text-gray-400"
                                         : "text-accent/80 hover:text-accent cursor-pointer"
                                 )}

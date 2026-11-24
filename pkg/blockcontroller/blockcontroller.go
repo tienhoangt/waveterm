@@ -369,7 +369,7 @@ func getTermSize(bdata *waveobj.Block) waveobj.TermSize {
 func HandleAppendBlockFile(blockId string, blockFile string, data []byte) error {
 	ctx, cancelFn := context.WithTimeout(context.Background(), DefaultTimeout)
 	defer cancelFn()
-	err := filestore.WFS.AppendData(ctx, blockId, blockFile, data)
+	newOffset, err := filestore.WFS.AppendDataWithOffset(ctx, blockId, blockFile, data)
 	if err != nil {
 		return fmt.Errorf("error appending to blockfile: %w", err)
 	}
@@ -379,10 +379,11 @@ func HandleAppendBlockFile(blockId string, blockFile string, data []byte) error 
 			waveobj.MakeORef(waveobj.OType_Block, blockId).String(),
 		},
 		Data: &wps.WSFileEventData{
-			ZoneId:   blockId,
-			FileName: blockFile,
-			FileOp:   wps.FileOp_Append,
-			Data64:   base64.StdEncoding.EncodeToString(data),
+			ZoneId:     blockId,
+			FileName:   blockFile,
+			FileOp:     wps.FileOp_Append,
+			Data64:     base64.StdEncoding.EncodeToString(data),
+			FileOffset: newOffset,
 		},
 	})
 	return nil

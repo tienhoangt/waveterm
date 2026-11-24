@@ -340,11 +340,18 @@ export class WaveAIModel {
     }
 
     focusInput() {
+        let wasHidden = false;
         if (!this.inBuilder && !WorkspaceLayoutModel.getInstance().getAIPanelVisible()) {
+            wasHidden = true;
             WorkspaceLayoutModel.getInstance().setAIPanelVisible(true);
         }
         if (this.inputRef?.current) {
             this.inputRef.current.focus();
+            if (wasHidden) {
+                requestAnimationFrame(() => {
+                    this.inputRef?.current?.focus();
+                });
+            }
         }
     }
 

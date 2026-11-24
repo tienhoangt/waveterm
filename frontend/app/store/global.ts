@@ -35,7 +35,7 @@ import { modalsModel } from "./modalmodel";
 import { ClientService, ObjectService } from "./services";
 import { isPreviewWindow } from "./windowtype";
 import * as WOS from "./wos";
-import { getFileSubject, waveEventSubscribeSingle } from "./wps";
+import { waveEventSubscribeSingle } from "./wps";
 
 let globalPrimaryTabStartup: boolean = false;
 
@@ -81,16 +81,8 @@ function initGlobalWaveEventSubs(initOpts: WaveInitOpts) {
         },
         scope: initOpts.windowId,
     });
-    waveEventSubscribeSingle({
-        eventType: "blockfile",
-        handler: (event) => {
-            // console.log("blockfile event update", event);
-            const fileSubject = getFileSubject(event.data.zoneid, event.data.filename);
-            if (fileSubject != null) {
-                fileSubject.next(event.data);
-            }
-        },
-    });
+    // "blockfile" events are subscribed per-block via ensureBlockFileSubscribed() in wps.ts
+    // using peekFileSubject() so inactive/evicted tabs never receive or leak fileSubjects.
     waveEventSubscribeSingle({
         eventType: "waveai:ratelimit",
         handler: (event) => {

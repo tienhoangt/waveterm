@@ -410,7 +410,7 @@ func InitRcFiles(waveHome string, absWshBinDir string) error {
 	if err != nil {
 		return fmt.Errorf("error writing bash-integration .bashrc: %v", err)
 	}
-	err = os.WriteFile(filepath.Join(bashDir, "bash_preexec.sh"), []byte(BashStartup_Preexec), 0644)
+	_, err = utilfn.AtomicWriteFileIfDifferent(filepath.Join(bashDir, "bash_preexec.sh"), []byte(BashStartup_Preexec), 0644)
 	if err != nil {
 		return fmt.Errorf("error writing bash-integration bash_preexec.sh: %v", err)
 	}
@@ -452,6 +452,10 @@ func initCustomShellStartupFilesInternal() error {
 	wshDstPath := filepath.Join(binDir, "wsh")
 	if runtime.GOOS == "windows" {
 		wshDstPath = wshDstPath + ".exe"
+	}
+	sameHash, hashErr := utilfn.FileSHA256Equal(wshDstPath, wshFullPath)
+	if hashErr == nil && sameHash {
+		return nil
 	}
 	err = utilfn.AtomicRenameCopy(wshDstPath, wshFullPath, 0755)
 	if err != nil {

@@ -12,6 +12,7 @@ export function useDimensionsWithCallbackRef<T extends HTMLElement>(
 ): [(node: T) => void, React.RefObject<T>, DOMRectReadOnly] {
     const [domRect, setDomRect] = useState<DOMRectReadOnly>(null);
     const [htmlElem, setHtmlElem] = useState<T>(null);
+    const hasMeasuredRef = React.useRef(false);
     const rszObjRef = React.useRef<ResizeObserver>(null);
     const oldHtmlElem = React.useRef<T>(null);
     const ref = React.useRef<T>(null);
@@ -32,7 +33,8 @@ export function useDimensionsWithCallbackRef<T extends HTMLElement>(
         if (!rszObjRef.current) {
             rszObjRef.current = new ResizeObserver((entries) => {
                 for (const entry of entries) {
-                    if (domRect == null) {
+                    if (!hasMeasuredRef.current) {
+                        hasMeasuredRef.current = true;
                         setDomRect(entry.contentRect);
                     } else {
                         setDomRectDebounced(entry.contentRect);
@@ -109,6 +111,7 @@ export function useDimensionsWithExistingRef<T extends HTMLElement>(
     debounceMs: number = null
 ): DOMRectReadOnly {
     const [domRect, setDomRect] = useState<DOMRectReadOnly>(null);
+    const hasMeasuredRef = React.useRef(false);
     const rszObjRef = React.useRef<ResizeObserver>(null);
     const oldHtmlElem = React.useRef<T>(null);
     const setDomRectDebounced = React.useCallback(debounceMs == null ? setDomRect : debounce(debounceMs, setDomRect), [
@@ -119,7 +122,8 @@ export function useDimensionsWithExistingRef<T extends HTMLElement>(
         if (!rszObjRef.current) {
             rszObjRef.current = new ResizeObserver((entries) => {
                 for (const entry of entries) {
-                    if (domRect == null) {
+                    if (!hasMeasuredRef.current) {
+                        hasMeasuredRef.current = true;
                         setDomRect(entry.contentRect);
                     } else {
                         setDomRectDebounced(entry.contentRect);

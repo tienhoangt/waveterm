@@ -103,7 +103,12 @@ try {
 }
 
 const loggerTransports: winston.transport[] = [
-    new winston.transports.File({ filename: path.join(getWaveDataDir(), "waveapp.log"), level: "info" }),
+    new winston.transports.File({
+        filename: path.join(getWaveDataDir(), "waveapp.log"),
+        level: "info",
+        maxsize: 10 * 1024 * 1024,
+        maxFiles: 3,
+    }),
 ];
 if (isDev) {
     loggerTransports.push(new winston.transports.Console());

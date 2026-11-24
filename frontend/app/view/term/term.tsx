@@ -13,10 +13,12 @@ import { waveEventSubscribeSingle } from "@/app/store/wps";
 import { RpcApi } from "@/app/store/wshclientapi";
 import { TabRpcClient } from "@/app/store/wshrpcutil";
 import type { TermViewModel } from "@/app/view/term/term-model";
-import { atoms, getOverrideConfigAtom, getSettingsPrefixAtom, WOS } from "@/store/global";
+import { atoms, getApi, getOverrideConfigAtom, getSettingsPrefixAtom, WOS } from "@/store/global";
+import { PLATFORM, PlatformWindows } from "@/util/platformutil";
 import { fireAndForget, useAtomValueSafe } from "@/util/util";
 import { computeBgStyleFromMeta } from "@/util/waveutil";
 import { ISearchOptions } from "@xterm/addon-search";
+import * as TermTypes from "@xterm/xterm";
 import clsx from "clsx";
 import debug from "debug";
 import * as jotai from "jotai";
@@ -29,6 +31,40 @@ import { TermWrap } from "./termwrap";
 import "./xterm.css";
 
 const dlog = debug("wave:term");
+
+function getWindowsPtyOption(): TermTypes.ITerminalOptions["windowsPty"] | undefined {
+    if (PLATFORM !== PlatformWindows) {
+        return undefined;
+    }
+    try {
+        const release = getApi().getOsRelease?.() ?? "";
+        const parts = release.split(".");
+        const buildNumber = parts.length >= 3 ? parseInt(parts[2], 10) : NaN;
+        if (!Number.isNaN(buildNumber) && buildNumber > 0) {
+            return { backend: "conpty", buildNumber };
+        }
+    } catch (e) {
+        console.warn("Failed to parse Windows OS release:", e);
+    }
+    return { backend: "conpty" };
+}
+
+function computeScrollback(termSettings: SettingsType, blockData: Block): number {
+    let termScrollback = 2000;
+    if (termSettings?.["term:scrollback"]) {
+        termScrollback = Math.floor(termSettings["term:scrollback"]);
+    }
+    if (blockData?.meta?.["term:scrollback"]) {
+        termScrollback = Math.floor(blockData.meta["term:scrollback"]);
+    }
+    if (termScrollback < 0) {
+        termScrollback = 0;
+    }
+    if (termScrollback > 50000) {
+        termScrollback = 50000;
+    }
+    return termScrollback;
+}
 
 interface TerminalViewProps {
     blockId: string;
@@ -192,12 +228,27 @@ const TerminalView = ({ blockId, model }: ViewComponentProps<TermViewModel>) => 
     const termModeRef = React.useRef(termMode);
 
     const tabModel = useTabModel();
+    const [tabData] = WOS.useWaveObjectValue<Tab>(WOS.makeORef("tab", tabModel.tabId));
+    const windowSettingsAtom = getSettingsPrefixAtom("window");
+    const windowSettings = jotai.useAtomValue(windowSettingsAtom);
+    const termTransparency = jotai.useAtomValue(model.termTransparencyAtom);
     const termFontSize = jotai.useAtomValue(model.fontSizeAtom);
     const fullConfig = globalStore.get(atoms.fullConfigAtom);
     const connFontFamily = fullConfig.connections?.[blockData?.meta?.connection]?.["term:fontfamily"];
     const isFocused = jotai.useAtomValue(model.nodeModel.isFocused);
     const isMI = jotai.useAtomValue(tabModel.isTermMultiInput);
     const isBasicTerm = termMode != "vdom" && blockData?.meta?.controller != "cmd"; // needs to match isBasicTerm
+    const isWindowTransparent = Boolean(
+        windowSettings?.["window:transparent"] || windowSettings?.["window:blur"]
+    );
+    const hasCustomTabBg = Boolean(
+        tabData?.meta?.["tab:background"] || tabData?.meta?.["bg"] || blockData?.meta?.["bg"]
+    );
+    const allowTransparency =
+        PLATFORM !== PlatformWindows ||
+        isWindowTransparent ||
+        hasCustomTabBg ||
+        (termTransparency != null && termTransparency > 0);
 
     // search
     const searchProps = useSearch({
@@ -272,27 +323,16 @@ const TerminalView = ({ blockId, model }: ViewComponentProps<TermViewModel>) => 
     React.useEffect(() => {
         const fullConfig = globalStore.get(atoms.fullConfigAtom);
         const termThemeName = globalStore.get(model.termThemeNameAtom);
-        const termTransparency = globalStore.get(model.termTransparencyAtom);
+        const curTermTransparency = globalStore.get(model.termTransparencyAtom);
         const termMacOptionIsMetaAtom = getOverrideConfigAtom(blockId, "term:macoptionismeta");
-        const [termTheme, _] = computeTheme(fullConfig, termThemeName, termTransparency);
-        let termScrollback = 2000;
-        if (termSettings?.["term:scrollback"]) {
-            termScrollback = Math.floor(termSettings["term:scrollback"]);
-        }
-        if (blockData?.meta?.["term:scrollback"]) {
-            termScrollback = Math.floor(blockData.meta["term:scrollback"]);
-        }
-        if (termScrollback < 0) {
-            termScrollback = 0;
-        }
-        if (termScrollback > 50000) {
-            termScrollback = 50000;
-        }
+        const [termTheme, bgcolor] = computeTheme(fullConfig, termThemeName, curTermTransparency, allowTransparency);
+        const termScrollback = computeScrollback(termSettings, blockData);
         const termAllowBPM = globalStore.get(model.termBPMAtom) ?? true;
         const termMacOptionIsMeta = globalStore.get(termMacOptionIsMetaAtom) ?? false;
         const termCursorStyle = normalizeCursorStyle(globalStore.get(getOverrideConfigAtom(blockId, "term:cursor")));
         const termCursorBlink = globalStore.get(getOverrideConfigAtom(blockId, "term:cursorblink")) ?? false;
         const wasFocused = model.termRef.current != null && globalStore.get(model.nodeModel.isFocused);
+        const windowsPty = getWindowsPtyOption();
         const termWrap = new TermWrap(
             tabModel.tabId,
             blockId,
@@ -300,11 +340,11 @@ const TerminalView = ({ blockId, model }: ViewComponentProps<TermViewModel>) => 
             {
                 theme: termTheme,
                 fontSize: termFontSize,
-                fontFamily: termSettings?.["term:fontfamily"] ?? connFontFamily ?? "Hack",
+                fontFamily: termSettings?.["term:fontfamily"] ?? connFontFamily ?? "Hack, 'Cascadia Mono', Consolas, monospace",
                 drawBoldTextInBrightColors: false,
                 fontWeight: "normal",
                 fontWeightBold: "bold",
-                allowTransparency: true,
+                allowTransparency,
                 scrollback: termScrollback,
                 allowProposedApi: true, // Required by @xterm/addon-search to enable search functionality and decorations
                 ignoreBracketedPasteMode: !termAllowBPM,
@@ -312,12 +352,14 @@ const TerminalView = ({ blockId, model }: ViewComponentProps<TermViewModel>) => 
                 cursorStyle: termCursorStyle,
                 cursorBlink: termCursorBlink,
                 overviewRuler: { width: 6 },
+                ...(windowsPty ? { windowsPty } : {}),
             },
             {
                 keydownHandler: model.handleTerminalKeydown.bind(model),
                 useWebGl: !termSettings?.["term:disablewebgl"],
                 sendDataHandler: model.sendDataToController.bind(model),
                 nodeModel: model.nodeModel,
+                bgColor: bgcolor,
             }
         );
         (window as any).term = termWrap;
@@ -338,11 +380,50 @@ const TerminalView = ({ blockId, model }: ViewComponentProps<TermViewModel>) => 
             }, 10);
         }
         return () => {
+            if ((window as any).term === termWrap) {
+                (window as any).term = null;
+            }
             termWrap.dispose();
             rszObs.disconnect();
             setTermWrapInst(null);
         };
-    }, [blockId, termSettings, termFontSize, connFontFamily]);
+    }, [blockId, allowTransparency]);
+
+    React.useEffect(() => {
+        const termWrap = model.termRef.current;
+        if (termWrap?.terminal == null) {
+            return;
+        }
+        const term = termWrap.terminal;
+        const newFontFamily =
+            termSettings?.["term:fontfamily"] ?? connFontFamily ?? "Hack, 'Cascadia Mono', Consolas, monospace";
+        const newScrollback = computeScrollback(termSettings, blockData);
+        let needsFit = false;
+        if (termFontSize != null && term.options.fontSize !== termFontSize) {
+            term.options.fontSize = termFontSize;
+            needsFit = true;
+        }
+        if (term.options.fontFamily !== newFontFamily) {
+            term.options.fontFamily = newFontFamily;
+            needsFit = true;
+        }
+        if (term.options.scrollback !== newScrollback) {
+            term.options.scrollback = newScrollback;
+        }
+        const termAllowBPM = globalStore.get(model.termBPMAtom) ?? true;
+        if (term.options.ignoreBracketedPasteMode !== !termAllowBPM) {
+            term.options.ignoreBracketedPasteMode = !termAllowBPM;
+        }
+        const termMacOptionIsMeta = globalStore.get(getOverrideConfigAtom(blockId, "term:macoptionismeta")) ?? false;
+        if (term.options.macOptionIsMeta !== termMacOptionIsMeta) {
+            term.options.macOptionIsMeta = termMacOptionIsMeta;
+        }
+        const wantWebGl = !termSettings?.["term:disablewebgl"];
+        termWrap.setTermRenderer(wantWebGl ? "webgl" : "dom");
+        if (needsFit) {
+            termWrap.handleResize();
+        }
+    }, [termWrapInst, termSettings, termFontSize, connFontFamily, blockData?.meta?.["term:scrollback"], blockId]);
 
     React.useEffect(() => {
         if (termModeRef.current == "vdom" && termMode == "term") {
@@ -388,7 +469,12 @@ const TerminalView = ({ blockId, model }: ViewComponentProps<TermViewModel>) => 
         <div className={clsx("view-term", "term-mode-" + termMode)} ref={viewRef} onContextMenu={handleContextMenu}>
             {termBg && <div key="term-bg" className="absolute inset-0 z-0 pointer-events-none" style={termBg} />}
             <TermResyncHandler blockId={blockId} model={model} />
-            <TermThemeUpdater blockId={blockId} model={model} termRef={model.termRef} />
+            <TermThemeUpdater
+                blockId={blockId}
+                model={model}
+                termRef={model.termRef}
+                allowTransparency={allowTransparency}
+            />
             <TermStickers config={stickerConfig} />
             <TermToolbarVDomNode key="vdom-toolbar" blockId={blockId} model={model} />
             <TermVDomNode key="vdom" blockId={blockId} model={model} />

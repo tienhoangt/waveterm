@@ -40,7 +40,7 @@ function loadHackNerdFont() {
     if (isHackNerdFontLoaded) {
         return;
     }
-    isHackFontLoaded = true;
+    isHackNerdFontLoaded = true;
     const hackRegular = new FontFace("Hack", "url('fonts/hacknerdmono-regular.ttf')", {
         style: "normal",
         weight: "400",

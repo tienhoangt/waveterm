@@ -287,7 +287,10 @@ type blockState struct {
 	// For text/reasoning: local SSE id
 	localID string
 	// Content block being built for rtnMessage
-	contentBlock *anthropicMessageContentBlock
+	contentBlock     *anthropicMessageContentBlock
+	textBuilder      strings.Builder
+	thinkingBuilder  strings.Builder
+	signatureBuilder strings.Builder
 	// For tool_use:
 	toolCallID string // Anthropic tool_use.id
 	toolName   string
@@ -634,15 +637,17 @@ func extractPartialTextFromState(state *streamingState) *anthropicChatMessage {
 	}
 	var partialIdx []int
 	for idx, st := range state.blockMap {
-		if st.kind == blockText && st.contentBlock != nil && st.contentBlock.Text != "" {
+		if st.kind == blockText && st.contentBlock != nil && st.textBuilder.Len() > 0 {
 			partialIdx = append(partialIdx, idx)
 		}
 	}
 	sort.Ints(partialIdx)
 	for _, idx := range partialIdx {
 		st := state.blockMap[idx]
-		if st.kind == blockText && st.contentBlock != nil && st.contentBlock.Text != "" {
-			content = append(content, *st.contentBlock)
+		if st.kind == blockText && st.contentBlock != nil && st.textBuilder.Len() > 0 {
+			blockCopy := *st.contentBlock
+			blockCopy.Text = st.textBuilder.String()
+			content = append(content, blockCopy)
 		}
 	}
 	if len(content) == 0 {
@@ -797,7 +802,7 @@ func handleAnthropicEvent(
 				_ = sse.AiMsgTextDelta(st.localID, ev.Delta.Text)
 				// Accumulate text in the content block
 				if st.contentBlock != nil {
-					st.contentBlock.Text += ev.Delta.Text
+					st.textBuilder.WriteString(ev.Delta.Text)
 				}
 			}
 		case "thinking_delta":
@@ -805,7 +810,7 @@ func handleAnthropicEvent(
 				_ = sse.AiMsgReasoningDelta(st.localID, ev.Delta.Thinking)
 				// Accumulate thinking content in the content block
 				if st.contentBlock != nil {
-					st.contentBlock.Thinking += ev.Delta.Thinking
+					st.thinkingBuilder.WriteString(ev.Delta.Thinking)
 				}
 			}
 		case "input_json_delta":
@@ -817,7 +822,7 @@ func handleAnthropicEvent(
 		case "signature_delta":
 			// Accumulate signature for thinking blocks
 			if st.kind == blockThinking && st.contentBlock != nil {
-				st.contentBlock.Signature += ev.Delta.Signature
+				st.signatureBuilder.WriteString(ev.Delta.Signature)
 			}
 		default:
 			// ignore unknown deltas gracefully. :contentReference[oaicite:20]{index=20}
@@ -842,12 +847,15 @@ func handleAnthropicEvent(
 			_ = sse.AiMsgTextEnd(st.localID)
 			// Add completed text block to rtnMessage
 			if st.contentBlock != nil {
+				st.contentBlock.Text = st.textBuilder.String()
 				state.rtnMessage.Content = append(state.rtnMessage.Content, *st.contentBlock)
 			}
 		case blockThinking:
 			_ = sse.AiMsgReasoningEnd(st.localID)
 			// Add completed thinking block to rtnMessage
 			if st.contentBlock != nil {
+				st.contentBlock.Thinking = st.thinkingBuilder.String()
+				st.contentBlock.Signature = st.signatureBuilder.String()
 				state.rtnMessage.Content = append(state.rtnMessage.Content, *st.contentBlock)
 			}
 		case blockToolUse:

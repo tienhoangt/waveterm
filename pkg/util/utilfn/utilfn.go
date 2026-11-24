@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -870,10 +871,62 @@ func AtoiNoErr(str string) int {
 	return val
 }
 
+func FileSHA256(filePath string) ([32]byte, error) {
+	var sum [32]byte
+	f, err := os.Open(filePath)
+	if err != nil {
+		return sum, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return sum, err
+	}
+	copy(sum[:], h.Sum(nil))
+	return sum, nil
+}
+
+func FileSHA256Equal(pathA string, pathB string) (bool, error) {
+	sumA, err := FileSHA256(pathA)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	sumB, err := FileSHA256(pathB)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return sumA == sumB, nil
+}
+
+func AtomicWriteFileIfDifferent(fileName string, data []byte, perms os.FileMode) (bool, error) {
+	existing, err := os.ReadFile(fileName)
+	if err == nil && bytes.Equal(existing, data) {
+		return false, nil
+	}
+	tempName := fileName + ".tmp"
+	if err := os.WriteFile(tempName, data, perms); err != nil {
+		return false, err
+	}
+	if err := os.Rename(tempName, fileName); err != nil {
+		_ = os.Remove(tempName)
+		return false, err
+	}
+	return true, nil
+}
+
 func WriteTemplateToFile(fileName string, templateText string, vars map[string]string) error {
 	outBuffer := &bytes.Buffer{}
-	template.Must(template.New("").Parse(templateText)).Execute(outBuffer, vars)
-	return os.WriteFile(fileName, outBuffer.Bytes(), 0644)
+	if err := template.Must(template.New("").Parse(templateText)).Execute(outBuffer, vars); err != nil {
+		return err
+	}
+	_, err := AtomicWriteFileIfDifferent(fileName, outBuffer.Bytes(), 0644)
+	return err
 }
 
 // every byte is 4-bits of randomness

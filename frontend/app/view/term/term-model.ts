@@ -698,7 +698,7 @@ export class TermViewModel implements ViewModel {
 
     handleTerminalKeydown(event: KeyboardEvent): boolean {
         const waveEvent = keyutil.adaptFromReactOrNativeKeyEvent(event);
-        if (waveEvent.type != "keydown") {
+        if (waveEvent.type != "keydown" || keyutil.isImeComposingEvent(waveEvent)) {
             return true;
         }
 

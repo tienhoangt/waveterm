@@ -301,10 +301,16 @@ export class WaveConfigViewModel implements ViewModel {
 
         try {
             const fullPath = `${this.configDir}/${file.path}`;
-            const fileData = await this.env.rpc.FileReadCommand(TabRpcClient, {
+            const fileInfo = await this.env.rpc.FileInfoCommand(TabRpcClient, {
                 info: { path: fullPath },
             });
-            const content = fileData?.data64 ? base64ToString(fileData.data64) : "";
+            let content = "";
+            if (!fileInfo?.notfound) {
+                const fileData = await this.env.rpc.FileReadCommand(TabRpcClient, {
+                    info: { path: fullPath },
+                });
+                content = fileData?.data64 ? base64ToString(fileData.data64) : "";
+            }
             globalStore.set(this.originalContentAtom, content);
             if (content.trim() === "") {
                 globalStore.set(this.fileContentAtom, "{\n\n}");

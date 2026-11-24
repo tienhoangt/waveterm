@@ -159,3 +159,40 @@ func TestExtractPartialTextMessageEmpty(t *testing.T) {
 		t.Fatal("expected nil when both text and reasoning are empty")
 	}
 }
+
+func TestReasoningContentPreservedWhenEmptyInThinkingMode(t *testing.T) {
+	original := ChatRequestMessage{
+		Role:                "assistant",
+		ReasoningContent:    "",
+		HasReasoningContent: true,
+		ToolCalls: []ToolCall{
+			{ID: "call_1", Type: "function", Function: ToolFunctionCall{Name: "read_file", Arguments: `{}`}},
+		},
+	}
+
+	cleaned := original.clean()
+	if !cleaned.HasReasoningContent {
+		t.Fatal("clean() should preserve HasReasoningContent=true")
+	}
+
+	data, err := json.Marshal(cleaned)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	jsonStr := string(data)
+	if !strings.Contains(jsonStr, `"reasoning_content":""`) {
+		t.Errorf("JSON must preserve empty reasoning_content when HasReasoningContent=true, got: %s", jsonStr)
+	}
+
+	var restored ChatRequestMessage
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if !restored.HasReasoningContent {
+		t.Errorf("restored.HasReasoningContent = false, want true")
+	}
+	if restored.ReasoningContent != "" {
+		t.Errorf("restored.ReasoningContent = %q, want empty string", restored.ReasoningContent)
+	}
+}

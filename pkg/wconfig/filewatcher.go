@@ -9,12 +9,15 @@ import (
 	"path/filepath"
 	"regexp"
 	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/wavetermdev/waveterm/pkg/panichandler"
 	"github.com/wavetermdev/waveterm/pkg/wavebase"
 	"github.com/wavetermdev/waveterm/pkg/wps"
 )
+
+const fileWatcherDebounceDelay = 150 * time.Millisecond
 
 var instance *Watcher
 var once sync.Once
@@ -24,7 +27,7 @@ type ConfigUpdateHandler func(FullConfigType)
 type Watcher struct {
 	initialized bool
 	watcher     *fsnotify.Watcher
-	mutex       sync.Mutex
+	mutex       sync.RWMutex
 	fullConfig  FullConfigType
 	handlers    []ConfigUpdateHandler
 }
@@ -61,26 +64,63 @@ func GetWatcher() *Watcher {
 	return instance
 }
 
+func (w *Watcher) LoadInitialConfig() FullConfigType {
+	fullConfig := ReadFullConfig()
+	w.mutex.Lock()
+	w.fullConfig = fullConfig
+	w.mutex.Unlock()
+	return fullConfig
+}
+
 func (w *Watcher) Start() {
 	w.mutex.Lock()
-	defer w.mutex.Unlock()
-
 	log.Printf("starting file watcher\n")
 	w.initialized = true
+	fsWatcher := w.watcher
+	w.mutex.Unlock()
+
 	w.sendInitialValues()
 
+	if fsWatcher == nil {
+		return
+	}
 	go func() {
 		defer func() {
 			panichandler.PanicHandler("filewatcher:Start", recover())
 		}()
+		var debounceTimer *time.Timer
+		var debounceCh <-chan time.Time
+		defer func() {
+			if debounceTimer != nil {
+				debounceTimer.Stop()
+			}
+		}()
 		for {
 			select {
-			case event, ok := <-w.watcher.Events:
+			case event, ok := <-fsWatcher.Events:
 				if !ok {
 					return
 				}
-				w.handleEvent(event)
-			case err, ok := <-w.watcher.Errors:
+				if !w.shouldHandleEvent(event) {
+					continue
+				}
+				if debounceTimer == nil {
+					debounceTimer = time.NewTimer(fileWatcherDebounceDelay)
+					debounceCh = debounceTimer.C
+				} else {
+					if !debounceTimer.Stop() {
+						select {
+						case <-debounceTimer.C:
+						default:
+						}
+					}
+					debounceTimer.Reset(fileWatcherDebounceDelay)
+				}
+			case <-debounceCh:
+				debounceCh = nil
+				debounceTimer = nil
+				w.reloadAndBroadcastConfig()
+			case err, ok := <-fsWatcher.Errors:
 				if !ok {
 					return
 				}
@@ -92,11 +132,7 @@ func (w *Watcher) Start() {
 
 // for initial values, exit on first error
 func (w *Watcher) sendInitialValues() error {
-	w.fullConfig = ReadFullConfig()
-	message := WatcherUpdate{
-		FullConfig: w.fullConfig,
-	}
-	w.broadcast(message)
+	w.reloadAndBroadcastConfig()
 	return nil
 }
 
@@ -110,12 +146,12 @@ func (w *Watcher) Close() {
 	}
 }
 
-func (w *Watcher) broadcast(message WatcherUpdate) {
+func (w *Watcher) broadcast(message WatcherUpdate, handlers []ConfigUpdateHandler) {
 	wps.Broker.Publish(wps.WaveEvent{
 		Event: wps.Event_Config,
 		Data:  message,
 	})
-	w.notifyHandlers(message.FullConfig)
+	w.notifyHandlers(message.FullConfig, handlers)
 }
 
 func (w *Watcher) RegisterUpdateHandler(handler ConfigUpdateHandler) {
@@ -124,8 +160,7 @@ func (w *Watcher) RegisterUpdateHandler(handler ConfigUpdateHandler) {
 	w.handlers = append(w.handlers, handler)
 }
 
-func (w *Watcher) notifyHandlers(config FullConfigType) {
-	handlers := w.handlers
+func (w *Watcher) notifyHandlers(config FullConfigType, handlers []ConfigUpdateHandler) {
 	for _, handler := range handlers {
 		go func(h ConfigUpdateHandler) {
 			defer func() {
@@ -137,23 +172,17 @@ func (w *Watcher) notifyHandlers(config FullConfigType) {
 }
 
 func (w *Watcher) GetFullConfig() FullConfigType {
-	w.mutex.Lock()
-	defer w.mutex.Unlock()
+	w.mutex.RLock()
+	defer w.mutex.RUnlock()
 	return w.fullConfig
 }
 
-func (w *Watcher) handleEvent(event fsnotify.Event) {
-	w.mutex.Lock()
-	defer w.mutex.Unlock()
-
+func (w *Watcher) shouldHandleEvent(event fsnotify.Event) bool {
 	fileName := filepath.ToSlash(event.Name)
 	if event.Op == fsnotify.Chmod {
-		return
+		return false
 	}
-	if !isValidSubSettingsFileName(fileName) {
-		return
-	}
-	w.handleSettingsFileEvent(event, fileName)
+	return isValidSubSettingsFileName(fileName)
 }
 
 var validFileRe = regexp.MustCompile(`^[a-zA-Z0-9_@.-]+\.json$`)
@@ -166,8 +195,12 @@ func isValidSubSettingsFileName(fileName string) bool {
 	return validFileRe.MatchString(baseName)
 }
 
-func (w *Watcher) handleSettingsFileEvent(_ fsnotify.Event, _ string) {
+func (w *Watcher) reloadAndBroadcastConfig() {
 	fullConfig := ReadFullConfig()
+	w.mutex.Lock()
 	w.fullConfig = fullConfig
-	w.broadcast(WatcherUpdate{FullConfig: w.fullConfig})
+	handlers := make([]ConfigUpdateHandler, len(w.handlers))
+	copy(handlers, w.handlers)
+	w.mutex.Unlock()
+	w.broadcast(WatcherUpdate{FullConfig: fullConfig}, handlers)
 }

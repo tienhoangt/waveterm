@@ -3,7 +3,7 @@
 
 import type { BlockNodeModel } from "@/app/block/blocktypes";
 import { setBadge } from "@/app/store/badge";
-import { getFileSubject } from "@/app/store/wps";
+import { ensureBlockFileSubscribed, getFileSubject } from "@/app/store/wps";
 import { RpcApi } from "@/app/store/wshclientapi";
 import { TabRpcClient } from "@/app/store/wshrpcutil";
 import {
@@ -26,8 +26,10 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import * as TermTypes from "@xterm/xterm";
 import { Terminal } from "@xterm/xterm";
+import { colord } from "colord";
 import debug from "debug";
 import * as jotai from "jotai";
+import type { Subscription } from "rxjs";
 import { debounce } from "throttle-debounce";
 import {
     handleOsc16162Command,
@@ -50,7 +52,8 @@ const dlog = debug("wave:termwrap");
 
 const TermFileName = "term";
 const TermCacheFileName = "cache:term:full";
-const MinDataProcessedForCache = 100 * 1024;
+const MinDataProcessedForCache = 512 * 1024;
+const MinIdleMsForCache = 15000;
 export const SupportsImageInput = true;
 const MaxRepaintTransactionMs = 2000;
 
@@ -59,7 +62,11 @@ function detectWebGLSupport(): boolean {
     try {
         const canvas = document.createElement("canvas");
         const ctx = canvas.getContext("webgl2");
-        return !!ctx;
+        if (!ctx) {
+            return false;
+        }
+        ctx.getExtension("WEBGL_lose_context")?.loseContext();
+        return true;
     } catch (e) {
         return false;
     }
@@ -73,6 +80,7 @@ type TermWrapOptions = {
     useWebGl?: boolean;
     sendDataHandler?: (data: string) => void;
     nodeModel?: BlockNodeModel;
+    bgColor?: string;
 };
 
 export class TermWrap {
@@ -86,12 +94,19 @@ export class TermWrap {
     searchAddon: SearchAddon;
     serializeAddon: SerializeAddon;
     mainFileSubject: SubjectWithRef<WSFileEventData>;
+    private mainFileSubjectSub: Subscription | null = null;
+    private isDisposed: boolean = false;
+    private idleTimeoutId: ReturnType<typeof setTimeout> | null = null;
+    private idleCallbackId: number | null = null;
+    private repaintRafId: number | null = null;
+    private focusListeners: (() => void)[] = [];
     loaded: boolean;
-    heldData: Uint8Array[];
+    heldData: { data: Uint8Array; fileoffset?: number }[];
     handleResize_debounced: () => void;
     hasResized: boolean;
     multiInputCallback: (data: string) => void;
     sendDataHandler: (data: string) => void;
+    bgColor: string = "#000000";
     onSearchResultsDidChange?: (result: { resultIndex: number; resultCount: number }) => void;
     toDispose: TermTypes.IDisposable[] = [];
     webglAddon: WebglAddon | null = null;
@@ -99,6 +114,7 @@ export class TermWrap {
     webglEnabledAtom: jotai.PrimitiveAtom<boolean>;
     pasteActive: boolean = false;
     lastUpdated: number;
+    lastDataTs: number = 0;
     promptMarkers: TermTypes.IMarker[] = [];
     shellIntegrationStatusAtom: jotai.PrimitiveAtom<ShellIntegrationStatus | null>;
     lastCommandAtom: jotai.PrimitiveAtom<string | null>;
@@ -122,6 +138,7 @@ export class TermWrap {
     lastMode2026ResetTs: number = 0;
     inSyncTransaction: boolean = false;
     inRepaintTransaction: boolean = false;
+    wasAtBottomBeforeRepaint: boolean = true;
 
     constructor(
         tabId: string,
@@ -134,6 +151,7 @@ export class TermWrap {
         this.tabId = tabId;
         this.blockId = blockId;
         this.sendDataHandler = waveOptions.sendDataHandler;
+        this.bgColor = waveOptions.bgColor || "#000000";
         this.nodeModel = waveOptions.nodeModel;
         this.ptyOffset = 0;
         this.dataBytesProcessed = 0;
@@ -171,6 +189,26 @@ export class TermWrap {
         );
         this.setTermRenderer(WebGLSupported && waveOptions.useWebGl ? "webgl" : "dom");
         // Register OSC handlers
+        this.toDispose.push(
+            this.terminal.parser.registerOscHandler(11, (data: string) => {
+                if (!this.loaded || data !== "?") {
+                    return false;
+                }
+                try {
+                    const parsed = colord(this.bgColor || "#000000");
+                    const { r, g, b } = parsed.isValid() ? parsed.toRgb() : { r: 0, g: 0, b: 0 };
+                    const clampByte = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
+                    const r16 = clampByte(r).toString(16).padStart(2, "0").repeat(2);
+                    const g16 = clampByte(g).toString(16).padStart(2, "0").repeat(2);
+                    const b16 = clampByte(b).toString(16).padStart(2, "0").repeat(2);
+                    this.sendDataHandler?.(`\x1b]11;rgb:${r16}/${g16}/${b16}\x1b\\`);
+                    return true;
+                } catch (e) {
+                    console.error("[termwrap] osc 11 handler error", this.blockId, e);
+                    return false;
+                }
+            })
+        );
         this.terminal.parser.registerOscHandler(7, (data: string) => {
             try {
                 return handleOsc7Command(data, this.blockId, this.loaded);
@@ -205,6 +243,7 @@ export class TermWrap {
                     if (this.inSyncTransaction) {
                         console.log("[termwrap] repaint transaction starting");
                         this.inRepaintTransaction = true;
+                        this.wasAtBottomBeforeRepaint = this.isViewportAtBottom();
                     }
                 }
                 return false;
@@ -218,6 +257,7 @@ export class TermWrap {
                 if (params[0] === 2026) {
                     this.lastMode2026SetTs = Date.now();
                     this.inSyncTransaction = true;
+                    this.wasAtBottomBeforeRepaint = this.isViewportAtBottom();
                 }
                 return false;
             })
@@ -231,12 +271,22 @@ export class TermWrap {
                     this.lastMode2026ResetTs = Date.now();
                     this.inSyncTransaction = false;
                     const wasRepaint = this.inRepaintTransaction;
+                    const wasAtBottom = this.wasAtBottomBeforeRepaint;
                     this.inRepaintTransaction = false;
-                    if (wasRepaint && Date.now() - this.lastClearScrollbackTs <= MaxRepaintTransactionMs) {
-                        setTimeout(() => {
-                            console.log("[termwrap] repaint transaction complete, scrolling to bottom");
-                            this.terminal.scrollToBottom();
-                        }, 20);
+                    if (
+                        wasRepaint &&
+                        wasAtBottom &&
+                        Date.now() - this.lastClearScrollbackTs <= MaxRepaintTransactionMs
+                    ) {
+                        if (this.repaintRafId != null) {
+                            cancelAnimationFrame(this.repaintRafId);
+                        }
+                        this.repaintRafId = requestAnimationFrame(() => {
+                            this.repaintRafId = null;
+                            if (!this.isDisposed) {
+                                this.terminal.scrollToBottom();
+                            }
+                        });
                     }
                 }
                 return false;
@@ -326,6 +376,18 @@ export class TermWrap {
         this.terminal.options.cursorBlink = cursorBlink ?? false;
     }
 
+    setBgColor(bgColor: string) {
+        this.bgColor = bgColor || "#000000";
+    }
+
+    private isViewportAtBottom(): boolean {
+        const buf = this.terminal?.buffer?.active;
+        if (buf == null) {
+            return true;
+        }
+        return buf.viewportY >= buf.baseY;
+    }
+
     setTermRenderer(renderer: "webgl" | "dom") {
         if (renderer === "webgl") {
             if (this.webglAddon != null) {
@@ -400,12 +462,19 @@ export class TermWrap {
         }
 
         this.mainFileSubject = getFileSubject(this.getZoneId(), TermFileName);
-        this.mainFileSubject.subscribe(this.handleNewFileSubjectData.bind(this));
+        this.mainFileSubjectSub = this.mainFileSubject.subscribe(this.handleNewFileSubjectData.bind(this));
+        await ensureBlockFileSubscribed(this.blockId);
+        if (this.isDisposed) {
+            return;
+        }
 
         try {
             const rtInfo = await RpcApi.GetRTInfoCommand(TabRpcClient, {
                 oref: WOS.makeORef("block", this.blockId),
             });
+            if (this.isDisposed) {
+                return;
+            }
             let shellState: ShellIntegrationStatus = null;
 
             if (rtInfo && rtInfo["shell:integration"]) {
@@ -425,13 +494,57 @@ export class TermWrap {
 
         try {
             await this.loadInitialTerminalData();
+            while (this.heldData.length > 0 && !this.isDisposed) {
+                const queued = this.heldData;
+                this.heldData = [];
+                for (const item of queued) {
+                    if (this.isDisposed) {
+                        return;
+                    }
+                    let chunk = item.data;
+                    if (item.fileoffset != null && item.fileoffset >= 0) {
+                        const chunkEnd = item.fileoffset + chunk.byteLength;
+                        if (chunkEnd <= this.ptyOffset) {
+                            continue;
+                        }
+                        if (item.fileoffset < this.ptyOffset) {
+                            chunk = chunk.subarray(this.ptyOffset - item.fileoffset);
+                        }
+                    }
+                    if (chunk.byteLength > 0) {
+                        await this.doTerminalWrite(chunk, null);
+                    }
+                }
+            }
         } finally {
             this.loaded = true;
+        }
+        if (this.isDisposed) {
+            return;
         }
         this.runProcessIdleTimeout();
     }
 
     dispose() {
+        this.isDisposed = true;
+        if (this.repaintRafId != null) {
+            cancelAnimationFrame(this.repaintRafId);
+            this.repaintRafId = null;
+        }
+        if (this.idleTimeoutId != null) {
+            clearTimeout(this.idleTimeoutId);
+            this.idleTimeoutId = null;
+        }
+        if (this.idleCallbackId != null) {
+            window.cancelIdleCallback(this.idleCallbackId);
+            this.idleCallbackId = null;
+        }
+        if (this.terminal?.textarea != null) {
+            for (const focusFn of this.focusListeners) {
+                this.terminal.textarea.removeEventListener("focus", focusFn);
+            }
+        }
+        this.focusListeners = [];
         this.promptMarkers.forEach((marker) => {
             try {
                 marker.dispose();
@@ -450,7 +563,10 @@ export class TermWrap {
                 /* nothing */
             }
         });
-        this.mainFileSubject.release();
+        this.mainFileSubjectSub?.unsubscribe();
+        this.mainFileSubjectSub = null;
+        this.mainFileSubject?.release();
+        this.mainFileSubject = null;
     }
 
     handleTermData(data: string) {
@@ -463,7 +579,8 @@ export class TermWrap {
     }
 
     addFocusListener(focusFn: () => void) {
-        this.terminal.textarea.addEventListener("focus", focusFn);
+        this.focusListeners.push(focusFn);
+        this.terminal.textarea?.addEventListener("focus", focusFn);
     }
 
     handleNewFileSubjectData(msg: WSFileEventData) {
@@ -475,7 +592,7 @@ export class TermWrap {
             if (this.loaded) {
                 this.doTerminalWrite(decodedData, null);
             } else {
-                this.heldData.push(decodedData);
+                this.heldData.push({ data: decodedData, fileoffset: msg.fileoffset });
             }
         } else {
             console.log("bad fileop for terminal", msg);
@@ -496,13 +613,15 @@ export class TermWrap {
             resolve = presolve;
         });
         this.terminal.write(data, () => {
+            const now = Date.now();
             if (setPtyOffset != null) {
                 this.ptyOffset = setPtyOffset;
             } else {
                 this.ptyOffset += data.length;
                 this.dataBytesProcessed += data.length;
+                this.lastDataTs = now;
             }
-            this.lastUpdated = Date.now();
+            this.lastUpdated = now;
             resolve();
         });
         return prtn;
@@ -512,6 +631,9 @@ export class TermWrap {
         const startTs = Date.now();
         const zoneId = this.getZoneId();
         const { data: cacheData, fileInfo: cacheFile } = await fetchWaveFile(zoneId, TermCacheFileName);
+        if (this.isDisposed) {
+            return;
+        }
         let ptyOffset = 0;
         if (cacheFile != null) {
             ptyOffset = cacheFile.meta["ptyoffset"] ?? 0;
@@ -527,13 +649,19 @@ export class TermWrap {
                     this.terminal.resize(fileTermSize.cols, fileTermSize.rows);
                     didResize = true;
                 }
-                this.doTerminalWrite(cacheData, ptyOffset);
+                await this.doTerminalWrite(cacheData, ptyOffset);
+                if (this.isDisposed) {
+                    return;
+                }
                 if (didResize) {
                     this.terminal.resize(curTermSize.cols, curTermSize.rows);
                 }
             }
         }
         const { data: mainData, fileInfo: mainFile } = await fetchWaveFile(zoneId, TermFileName, ptyOffset);
+        if (this.isDisposed) {
+            return;
+        }
         console.log(
             `terminal loaded cachefile:${cacheData?.byteLength ?? 0} main:${mainData?.byteLength ?? 0} bytes, ${Date.now() - startTs}ms`
         );
@@ -581,6 +709,9 @@ export class TermWrap {
         if (this.dataBytesProcessed < MinDataProcessedForCache) {
             return;
         }
+        if (Date.now() - this.lastDataTs < MinIdleMsForCache) {
+            return;
+        }
         const serializedOutput = this.serializeAddon.serialize();
         const termSize: TermSize = { rows: this.terminal.rows, cols: this.terminal.cols };
         console.log("idle timeout term", this.dataBytesProcessed, serializedOutput.length, termSize);
@@ -591,8 +722,19 @@ export class TermWrap {
     }
 
     runProcessIdleTimeout() {
-        setTimeout(() => {
-            window.requestIdleCallback(() => {
+        if (this.isDisposed) {
+            return;
+        }
+        this.idleTimeoutId = setTimeout(() => {
+            this.idleTimeoutId = null;
+            if (this.isDisposed) {
+                return;
+            }
+            this.idleCallbackId = window.requestIdleCallback(() => {
+                this.idleCallbackId = null;
+                if (this.isDisposed) {
+                    return;
+                }
                 this.processAndCacheData();
                 this.runProcessIdleTimeout();
             });

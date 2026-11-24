@@ -393,8 +393,8 @@ type openaiBlockState struct {
 	toolCallID      string // For function calls
 	toolName        string // For function calls
 	summaryCount    int    // For reasoning: number of summary parts seen
-	partialJSON     []byte // For function calls: accumulated JSON arguments
-	accumulatedText string // For text blocks: accumulated text content
+	partialJSON     []byte          // For function calls: accumulated JSON arguments
+	accumulatedText strings.Builder // For text blocks: accumulated text content
 }
 
 type openaiStreamingState struct {
@@ -680,10 +680,10 @@ func extractPartialTextFromState(state *openaiStreamingState) []*OpenAIChatMessa
 	var textContent []OpenAIMessageContent
 
 	for _, blockState := range state.blockMap {
-		if blockState.kind == openaiBlockText && blockState.accumulatedText != "" {
+		if blockState.kind == openaiBlockText && blockState.accumulatedText.Len() > 0 {
 			textContent = append(textContent, OpenAIMessageContent{
 				Type: "output_text",
-				Text: blockState.accumulatedText,
+				Text: blockState.accumulatedText.String(),
 			})
 		}
 	}
@@ -826,7 +826,7 @@ func handleOpenAIEvent(
 		}
 
 		if st := state.blockMap[ev.ItemId]; st != nil && st.kind == openaiBlockText {
-			st.accumulatedText += ev.Delta
+			st.accumulatedText.WriteString(ev.Delta)
 			_ = sse.AiMsgTextDelta(st.localID, ev.Delta)
 		}
 		return nil, nil

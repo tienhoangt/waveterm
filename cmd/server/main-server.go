@@ -10,6 +10,7 @@ import (
 	"os"
 
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -83,9 +84,10 @@ func doShutdown(reason string) {
 		go blockcontroller.StopAllBlockControllersForShutdown()
 		shutdownActivityUpdate()
 		sendTelemetryWrapper()
-		// TODO deal with flush in progress
 		clearTempFiles()
-		filestore.WFS.FlushCache(ctx)
+		if _, err := filestore.WFS.FlushWait(ctx); err != nil {
+			log.Printf("error flushing filestore on shutdown: %v\n", err)
+		}
 		watcher := wconfig.GetWatcher()
 		if watcher != nil {
 			watcher.Close()
@@ -390,7 +392,9 @@ func createMainWshClient() {
 	sockName := wavebase.GetDomainSocketName()
 	remoteImpl := wshremote.MakeRemoteRpcServerImpl(nil, wshutil.DefaultRouter, wshclient.GetBareRpcClient(), true, localInitialEnv, sockName)
 	localConnWsh := wshutil.MakeWshRpc(wshrpc.RpcContext{Conn: wshrpc.LocalConnName}, remoteImpl, "conn:local")
-	go wshremote.RunSysInfoLoop(localConnWsh, wshrpc.LocalConnName)
+	go wshremote.RunSysInfoLoopWithPredicate(localConnWsh, wshrpc.LocalConnName, func() bool {
+		return wps.Broker.HasSubscribers(wps.Event_SysInfo)
+	})
 	wshutil.DefaultRouter.RegisterTrustedLeaf(localConnWsh, wshutil.MakeConnectionRouteId(wshrpc.LocalConnName))
 	wshfs.RpcClient = localConnWsh
 	wshfs.RpcClientRouteId = wshutil.MakeConnectionRouteId(wshrpc.LocalConnName)
@@ -457,6 +461,12 @@ func maybeStartPprofServer() {
 }
 
 func main() {
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(512 << 20)
+	}
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(75)
+	}
 	log.SetFlags(0) // disable timestamp since electron's winston logger already wraps with timestamp
 	log.SetPrefix("[wavesrv] ")
 	wavebase.WaveVersion = WaveVersion
@@ -535,6 +545,10 @@ func main() {
 			log.Printf("error initializing wsh and shell-integration files: %v\n", err)
 		}
 	}()
+	wconfig.MigratePresetsBackgrounds()
+	if watcher := wconfig.GetWatcher(); watcher != nil {
+		watcher.LoadInitialConfig()
+	}
 	firstLaunch, err := wcore.EnsureInitialData()
 	if err != nil {
 		log.Printf("error ensuring initial data: %v\n", err)
@@ -561,7 +575,6 @@ func main() {
 	createMainWshClient()
 	sigutil.InstallShutdownSignalHandlers(doShutdown)
 	sigutil.InstallSIGUSR1Handler()
-	wconfig.MigratePresetsBackgrounds()
 	startConfigWatcher()
 	aiusechat.InitAIModeConfigWatcher()
 	maybeStartPprofServer()

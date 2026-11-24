@@ -549,21 +549,85 @@ func (bc *ShellController) manageRunningShellProcess(shellProc *shellexec.ShellP
 			time.Sleep(100 * time.Millisecond)
 			close(shellInputCh) // don't use bc.ShellInputCh (it's nil)
 		}()
-		buf := make([]byte, 4096)
-		for {
-			nr, err := shellProc.Cmd.Read(buf)
-			if nr > 0 {
-				err := HandleAppendBlockFile(bc.BlockId, wavebase.BlockFile_Term, buf[:nr])
+		const (
+			ptyCoalesceWindow   = 12 * time.Millisecond
+			ptyCoalesceMaxBytes = 32 * 1024
+		)
+		readCh := make(chan []byte, 16)
+		go func() {
+			defer func() {
+				panichandler.PanicHandler("blockcontroller:shellproc-pty-reader", recover())
+				close(readCh)
+			}()
+			buf := make([]byte, 4096)
+			for {
+				nr, err := shellProc.Cmd.Read(buf)
+				if nr > 0 {
+					chunk := make([]byte, nr)
+					copy(chunk, buf[:nr])
+					readCh <- chunk
+				}
+				if err == io.EOF {
+					return
+				}
 				if err != nil {
-					log.Printf("error appending to blockfile: %v\n", err)
+					log.Printf("error reading from shell: %v\n", err)
+					return
 				}
 			}
-			if err == io.EOF {
-				break
+		}()
+
+		var pending []byte
+		var flushTimer *time.Timer
+		var flushCh <-chan time.Time
+		defer func() {
+			if flushTimer != nil {
+				flushTimer.Stop()
 			}
-			if err != nil {
-				log.Printf("error reading from shell: %v\n", err)
-				break
+		}()
+		flushPending := func() {
+			if len(pending) == 0 {
+				return
+			}
+			if err := HandleAppendBlockFile(bc.BlockId, wavebase.BlockFile_Term, pending); err != nil {
+				log.Printf("error appending to blockfile: %v\n", err)
+			}
+			if cap(pending) > 4*ptyCoalesceMaxBytes {
+				pending = nil
+			} else {
+				pending = pending[:0]
+			}
+			if flushTimer != nil {
+				if !flushTimer.Stop() {
+					select {
+					case <-flushTimer.C:
+					default:
+					}
+				}
+				flushCh = nil
+			}
+		}
+		for {
+			select {
+			case chunk, ok := <-readCh:
+				if !ok {
+					flushPending()
+					return
+				}
+				pending = append(pending, chunk...)
+				if len(pending) >= ptyCoalesceMaxBytes {
+					flushPending()
+				} else if flushCh == nil {
+					if flushTimer == nil {
+						flushTimer = time.NewTimer(ptyCoalesceWindow)
+					} else {
+						flushTimer.Reset(ptyCoalesceWindow)
+					}
+					flushCh = flushTimer.C
+				}
+			case <-flushCh:
+				flushCh = nil
+				flushPending()
 			}
 		}
 	}()

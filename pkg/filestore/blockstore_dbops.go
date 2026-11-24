@@ -115,3 +115,39 @@ func dbWriteCacheEntry(ctx context.Context, file *WaveFile, dataEntries map[int]
 		return nil
 	})
 }
+
+func dbWriteCacheBatch(ctx context.Context, snaps []*cacheSnapshot) (map[cacheKey]bool, error) {
+	if len(snaps) == 0 {
+		return nil, nil
+	}
+	deletedKeys := make(map[cacheKey]bool)
+	err := WithTx(ctx, func(tx *TxWrap) error {
+		existsQuery := `SELECT zoneid FROM db_wave_file WHERE zoneid = ? AND name = ?`
+		updateQuery := `UPDATE db_wave_file SET size = ?, modts = ?, meta = ? WHERE zoneid = ? AND name = ?`
+		deletePartsQuery := `DELETE FROM db_file_data WHERE zoneid = ? AND name = ?`
+		dataPartQuery := `REPLACE INTO db_file_data (zoneid, name, partidx, data) VALUES (?, ?, ?, ?)`
+		for _, snap := range snaps {
+			file := snap.File
+			if !tx.Exists(existsQuery, file.ZoneId, file.Name) {
+				// since deletion is synchronous this stops us from writing to a deleted file
+				deletedKeys[snap.Key] = true
+				continue
+			}
+			tx.Exec(updateQuery, file.Size, file.ModTs, dbutil.QuickJson(file.Meta), file.ZoneId, file.Name)
+			if snap.NeedsReplace {
+				tx.Exec(deletePartsQuery, file.ZoneId, file.Name)
+			}
+			for partIdx, dataEntry := range snap.DataEntries {
+				if partIdx != dataEntry.PartIdx {
+					panic(fmt.Sprintf("partIdx:%d and dataEntry.PartIdx:%d do not match", partIdx, dataEntry.PartIdx))
+				}
+				tx.Exec(dataPartQuery, file.ZoneId, file.Name, dataEntry.PartIdx, dataEntry.Data)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return deletedKeys, nil
+}

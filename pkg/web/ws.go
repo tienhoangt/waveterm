@@ -4,6 +4,7 @@
 package web
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -127,6 +128,12 @@ func processWSCommand(jmsg map[string]any, outputCh chan any, rpcInputCh chan ba
 	}
 }
 
+type wsIncomingEnvelope struct {
+	Type      string          `json:"type"`
+	WSCommand string          `json:"wscommand"`
+	Message   json.RawMessage `json:"message"`
+}
+
 func ReadLoop(conn *websocket.Conn, outputCh chan any, closeCh chan any, rpcInputCh chan baseds.RpcInputChType, routeId string) {
 	readWait := wsReadWaitTimeout
 	conn.SetReadLimit(wsMaxMessageSize)
@@ -138,27 +145,39 @@ func ReadLoop(conn *websocket.Conn, outputCh chan any, closeCh chan any, rpcInpu
 			log.Printf("[websocket] ReadPump error (%s): %v\n", routeId, err)
 			break
 		}
-		jmsg := map[string]any{}
-		err = json.Unmarshal(message, &jmsg)
+		var env wsIncomingEnvelope
+		err = json.Unmarshal(message, &env)
 		if err != nil {
 			log.Printf("[websocket] error unmarshalling json: %v\n", err)
 			break
 		}
 		conn.SetReadDeadline(time.Now().Add(readWait))
-		msgType := getMessageType(jmsg)
-		if msgType == "pong" {
+		if env.Type == "pong" {
 			// nothing
 			continue
 		}
-		if msgType == "ping" {
+		if env.Type == "ping" {
 			now := time.Now()
 			pongMessage := map[string]interface{}{"type": "pong", "stime": now.UnixMilli()}
 			outputCh <- pongMessage
 			continue
 		}
-		wsCommand := getStringFromMap(jmsg, "wscommand")
-		if wsCommand == "" {
+		if env.WSCommand == "" {
 			continue
+		}
+		if env.WSCommand == webcmd.WSCommand_Rpc {
+			trimmed := bytes.TrimSpace(env.Message)
+			if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+				continue
+			}
+			rpcInputCh <- baseds.RpcInputChType{MsgBytes: trimmed}
+			continue
+		}
+		jmsg := map[string]any{}
+		err = json.Unmarshal(message, &jmsg)
+		if err != nil {
+			log.Printf("[websocket] error unmarshalling json: %v\n", err)
+			break
 		}
 		processWSCommand(jmsg, outputCh, rpcInputCh)
 	}

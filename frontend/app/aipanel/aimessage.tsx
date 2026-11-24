@@ -3,7 +3,7 @@
 
 import { WaveStreamdown } from "@/app/element/streamdown";
 import { cn } from "@/util/util";
-import { memo, useEffect, useRef } from "react";
+import { memo, useEffect, useMemo, useRef } from "react";
 import { getFileIcon } from "./ai-utils";
 import { AIFeedbackButtons } from "./aifeedbackbuttons";
 import { AIToolUseGroup } from "./aitooluse";
@@ -209,13 +209,28 @@ const getThinkingMessage = (
 
 export const AIMessage = memo(({ message, isStreaming }: AIMessageProps) => {
     const parts = message.parts || [];
-    const displayParts = parts.filter(isDisplayPart);
-    const fileParts = parts.filter(
-        (part): part is WaveUIMessagePart & { type: "data-userfile" } => part.type === "data-userfile"
+    const displayParts = useMemo(() => parts.filter(isDisplayPart), [parts]);
+    const fileParts = useMemo(
+        () =>
+            parts.filter(
+                (part): part is WaveUIMessagePart & { type: "data-userfile" } => part.type === "data-userfile"
+            ),
+        [parts]
     );
 
-    const thinkingData = getThinkingMessage(parts, isStreaming, message.role);
-    const groupedParts = groupMessageParts(displayParts);
+    const thinkingData = useMemo(
+        () => getThinkingMessage(parts, isStreaming, message.role),
+        [parts, isStreaming, message.role]
+    );
+    const groupedParts = useMemo(() => groupMessageParts(displayParts), [displayParts]);
+    const feedbackMessageText = useMemo(
+        () =>
+            parts
+                .filter((p) => p.type === "text")
+                .map((p) => p.text || "")
+                .join("\n\n"),
+        [parts]
+    );
 
     return (
         <div className={cn("flex", message.role === "user" ? "justify-end" : "justify-start")}>
@@ -254,12 +269,7 @@ export const AIMessage = memo(({ message, isStreaming }: AIMessageProps) => {
 
                 {message.role === "user" && <UserMessageFiles fileParts={fileParts} />}
                 {message.role === "assistant" && !isStreaming && displayParts.length > 0 && (
-                    <AIFeedbackButtons
-                        messageText={parts
-                            .filter((p) => p.type === "text")
-                            .map((p) => p.text || "")
-                            .join("\n\n")}
-                    />
+                    <AIFeedbackButtons messageText={feedbackMessageText} />
                 )}
             </div>
         </div>

@@ -82,6 +82,7 @@ declare global {
         getIsDev(): boolean; // get-is-dev
         getCursorPoint: () => Electron.Point; // get-cursor-point
         getPlatform: () => NodeJS.Platform; // get-platform
+        getOsRelease: () => string; // get-os-release
         getEnv: (varName: string) => string; // get-env
         getUserName: () => string; // get-user-name
         getHostName: () => string; // get-host-name
@@ -106,7 +107,7 @@ declare global {
         getUpdaterChannel: () => string; // get-updater-channel
         installAppUpdate: () => void; // install-app-update
         onMenuItemAbout: (callback: () => void) => void; // menu-item-about
-        updateWindowControlsOverlay: (rect: Dimensions) => void; // update-window-controls-overlay
+        updateWindowControlsOverlay: (payload: Dimensions | { color: string; isDark: boolean }) => void; // update-window-controls-overlay
         onReinjectKey: (callback: (waveEvent: WaveKeyboardEvent) => void) => void; // reinject-key
         setWebviewFocus: (focusedId: number) => void; // webview-focus, focusedId is the getWebContentsId of the webview
         registerGlobalWebviewKeys: (keys: string[]) => void; // register-global-webview-keys

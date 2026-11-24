@@ -5,8 +5,9 @@ import { MetaKeyAtomFnType, useWaveEnv, WaveEnv, WaveEnvSubset } from "@/app/wav
 import { PLATFORM, PlatformMacOS } from "@/util/platformutil";
 import { computeBgStyleFromMeta } from "@/util/waveutil";
 import useResizeObserver from "@react-hook/resize-observer";
+import { colord } from "colord";
 import { useAtomValue } from "jotai";
-import { CSSProperties, useCallback, useLayoutEffect, useRef } from "react";
+import { CSSProperties, useCallback, useLayoutEffect, useMemo, useRef } from "react";
 import { debounce } from "throttle-debounce";
 import { atoms, getApi, WOS } from "./store/global";
 import { useWaveObjectValue } from "./store/wos";
@@ -24,15 +25,54 @@ export function AppBackground() {
     const tabBg = useAtomValue(env.getTabMetaKeyAtom(tabId, "tab:background"));
     const configBg = useAtomValue(env.getConfigBackgroundAtom(tabBg));
     const resolvedMeta: Omit<BackgroundConfigType, "display:name"> = tabBg && configBg ? configBg : tabData?.meta;
-    const style: CSSProperties = computeBgStyleFromMeta(resolvedMeta, 0.5) ?? {};
+    const bgVal = resolvedMeta?.["bg"];
+    const bgOpacity = resolvedMeta?.["bg:opacity"];
+    const bgBlendMode = resolvedMeta?.["bg:blendmode"];
+    const style: CSSProperties = useMemo(
+        () =>
+            computeBgStyleFromMeta(
+                {
+                    bg: bgVal,
+                    "bg:opacity": bgOpacity,
+                    "bg:blendmode": bgBlendMode,
+                },
+                0.5
+            ) ?? {},
+        [bgVal, bgOpacity, bgBlendMode]
+    );
+    const hasBgImage = useMemo(() => {
+        if (typeof style.background !== "string") {
+            return false;
+        }
+        return style.background.includes("url(") || style.background.includes("gradient(");
+    }, [style.background]);
     const getAvgColor = useCallback(
-        debounce(30, () => {
+        debounce(250, () => {
             if (
                 bgRef.current &&
                 PLATFORM !== PlatformMacOS &&
-                bgRef.current &&
                 "windowControlsOverlay" in window.navigator
             ) {
+                if (!hasBgImage) {
+                    const bgStr = typeof style.background === "string" ? style.background.trim() : "";
+                    const parsedBg = bgStr ? colord(bgStr) : null;
+                    if (parsedBg && parsedBg.isValid()) {
+                        getApi().updateWindowControlsOverlay({
+                            color: parsedBg.toRgbString(),
+                            isDark: parsedBg.isDark(),
+                        });
+                        return;
+                    }
+                    const cssMainBg =
+                        getComputedStyle(document.body).getPropertyValue("--main-bg-color").trim() || "#222222";
+                    const parsedMain = colord(cssMainBg);
+                    const finalColor = parsedMain.isValid() ? parsedMain : colord("#222222");
+                    getApi().updateWindowControlsOverlay({
+                        color: finalColor.toRgbString(),
+                        isDark: finalColor.isDark(),
+                    });
+                    return;
+                }
                 const titlebarRect: Dimensions = (window.navigator.windowControlsOverlay as any).getTitlebarAreaRect();
                 const bgRect = bgRef.current.getBoundingClientRect();
                 if (titlebarRect && bgRect) {
@@ -47,9 +87,14 @@ export function AppBackground() {
                 }
             }
         }),
-        [bgRef, style]
+        [hasBgImage, style.background]
     );
-    useLayoutEffect(getAvgColor, [getAvgColor]);
+    useLayoutEffect(() => {
+        getAvgColor();
+        return () => {
+            getAvgColor.cancel();
+        };
+    }, [getAvgColor]);
     useResizeObserver(bgRef, getAvgColor);
 
     return (

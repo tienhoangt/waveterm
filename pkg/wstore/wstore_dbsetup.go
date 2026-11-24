@@ -48,11 +48,14 @@ func GetDBName() string {
 
 func MakeDB(ctx context.Context) (*sqlx.DB, error) {
 	dbName := GetDBName()
-	rtn, err := sqlx.Open("sqlite3", fmt.Sprintf("file:%s?mode=rwc&_journal_mode=WAL&_busy_timeout=5000", dbName))
+	rtn, err := sqlx.Open("sqlite3", fmt.Sprintf("file:%s?mode=rwc&_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_temp_store=MEMORY&_cache_size=-16000", dbName))
 	if err != nil {
 		return nil, err
 	}
 	rtn.DB.SetMaxOpenConns(1)
+	if _, err := rtn.ExecContext(ctx, "PRAGMA wal_autocheckpoint=1000"); err != nil {
+		log.Printf("[db] warning: setting wal_autocheckpoint failed: %v\n", err)
+	}
 	return rtn, nil
 }
 
